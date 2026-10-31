@@ -173,6 +173,12 @@ node build.cjs         # 拼接生成 advisra.html
 
 ---
 
+## 项目说明
+
+一页纸版本（问题 / 方案 / 边界）：**[docs/PROJECT-BRIEF.md](./docs/PROJECT-BRIEF.md)**
+
+---
+
 ## License
 
 MIT
