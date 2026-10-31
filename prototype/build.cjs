@@ -25,7 +25,7 @@ for (const s of scripts) out += '\n' + s + '\n';
 
 out += '\n</body>\n</html>\n';
 
-const target = path.join(dir, 'advisra.html');
+const target = path.join(dir, 'index.html');
 fs.writeFileSync(target, out, 'utf8');
 console.log('生成完成：', target);
 console.log('大小：', (out.length / 1024 / 1024).toFixed(2), 'MB');

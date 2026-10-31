@@ -10,4 +10,4 @@
 
 # 大文件：pdf.js 内联产物，避免 diff 展开
 prototype/parts/05_pdfjs.html  linguist-vendored
-prototype/advisra.html         linguist-generated
+prototype/index.html          linguist-generated
