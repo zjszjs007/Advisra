@@ -1,0 +1,265 @@
+<script>
+/* ==================== 视图四：配置方案 ==================== */
+let allocState = { step: 1, clientId: 'C002', result: null };
+
+function renderAllocate(){
+  return `
+  <div class="view" id="view-allocate">
+    <div class="wizard-steps">
+      <div class="wstep on" id="ws1"><span class="num">1</span><span class="lbl">客户信息</span></div>
+      <div class="wstep" id="ws2"><span class="num">2</span><span class="lbl">配置诊断</span></div>
+      <div class="wstep" id="ws3"><span class="num">3</span><span class="lbl">产品匹配</span></div>
+      <div class="wstep" id="ws4"><span class="num">4</span><span class="lbl">建议书</span></div>
+    </div>
+    <div id="allocBody"></div>
+  </div>`;
+}
+
+function allocForm(){
+  const c = CLIENTS.find(x => x.id === allocState.clientId) || CLIENTS[1];
+  return `
+  <div class="card">
+    <div class="card-h"><h3>步骤一 · 确认客户信息</h3><span class="sub">可手动调整，调整后会重新计算配置</span></div>
+    <div class="form-grid">
+      <div class="field"><label>选择客户</label>
+        <select id="f_client">${CLIENTS.map(x => `<option value="${x.id}" ${x.id===c.id?'selected':''}>${x.name}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>年龄</label><input type="number" id="f_age" value="${c.age}"></div>
+      <div class="field"><label>风险测评等级</label>
+        <select id="f_risk">
+          ${[1,2,3,4,5].map(r => `<option value="${r}" ${r===c.risk?'selected':''}>C${r} ${['','保守型','稳健型','平衡型','成长型','进取型'][r]}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>可投资金额（万元）</label><input type="number" id="f_amount" value="${c.investable/10000}"></div>
+      <div class="field"><label>投资期限</label>
+        <select id="f_horizon">
+          ${['1-3 年','3-5 年','5-8 年','8-10 年','10 年以上'].map(h => `<option ${h===c.horizon?'selected':''}>${h}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>流动性需求</label>
+        <select id="f_liquid">
+          ${['流动性需求高','流动性需求中等','流动性需求低'].map(h => `<option ${h===c.liquid?'selected':''}>${h}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div style="margin-top:18px;display:flex;gap:9px">
+      <button class="btn primary" data-act="alloc-run">生成配置方案</button>
+      <button class="btn ghost" data-act="alloc-reset">重置</button>
+    </div>
+  </div>`;
+}
+
+/* 配置计算引擎（确定性计算，不交给模型） */
+function computeAllocation(risk, amount, age, liquid){
+  const base = Object.assign({}, ALLOC_MODEL[risk]);
+  // 年龄修正：年龄越大，权益下调、债券上调
+  if (age >= 55){ base.equity = Math.max(5, base.equity - 10); base.bond += 6; base.ins += 4; }
+  else if (age >= 45){ base.equity = Math.max(10, base.equity - 5); base.bond += 3; base.ins += 2; }
+  else if (age <= 35){ base.equity += 3; base.cash = Math.max(6, base.cash - 3); }
+  // 流动性修正
+  if (liquid === '流动性需求高'){ base.cash += 8; base.equity = Math.max(5, base.equity - 5); base.alt = Math.max(0, base.alt - 3); }
+  if (liquid === '流动性需求低'){ base.cash = Math.max(5, base.cash - 4); base.bond += 4; }
+
+  const total = Object.values(base).reduce((a, b) => a + b, 0);
+  const out = {};
+  ACCOUNT_DEF.forEach(a => {
+    out[a.key] = { pct: base[a.key] / total * 100, amt: amount * base[a.key] / total };
+  });
+  return out;
+}
+
+function allocResult(){
+  const c = CLIENTS.find(x => x.id === allocState.clientId) || CLIENTS[1];
+  const age = +($('#f_age')?.value || c.age);
+  const risk = +($('#f_risk')?.value || c.risk);
+  const amount = (+($('#f_amount')?.value || c.investable/10000)) * 10000;
+  const liquid = $('#f_liquid')?.value || c.liquid;
+
+  const alloc = computeAllocation(risk, amount, age, liquid);
+  allocState.result = { alloc, amount, risk, age, c };
+
+  // 环形图数据
+  let acc = 0;
+  const segs = ACCOUNT_DEF.map(a => {
+    const s = { ...a, ...alloc[a.key] };
+    s.offset = acc; acc += s.pct;
+    return s;
+  });
+
+  const diagnostics = buildAllocDiagnostics(c, alloc, risk);
+
+  return `
+  <div class="card" style="margin-top:16px">
+    <div class="card-h">
+      <h3>步骤二 · 配置诊断与建议方案</h3>
+      <span class="sub">${c.name} · C${risk} · ${wan(amount)}</span>
+      <span class="right">计算耗时 0.8s · 数据口径 2026-10-31</span>
+    </div>
+    <div class="allocation-vis">
+      <div class="donut-wrap">
+        <svg width="170" height="170" viewBox="0 0 42 42">
+          <circle cx="21" cy="21" r="15.9" fill="none" stroke="#1b242d" stroke-width="6"></circle>
+          ${segs.map(s => `<circle cx="21" cy="21" r="15.9" fill="none"
+            stroke="${s.color}" stroke-width="6"
+            stroke-dasharray="${s.pct} ${100 - s.pct}"
+            stroke-dashoffset="${25 - s.offset}"
+            transform="rotate(0 21 21)"></circle>`).join('')}
+        </svg>
+        <div class="donut-center">
+          <div class="big">${wan(amount)}</div>
+          <div class="sml">可投资金额</div>
+        </div>
+      </div>
+      <div class="alloc-table">
+        ${segs.map(s => `
+          <div class="alloc-row">
+            <span class="sq" style="width:9px;height:9px;border-radius:2px;background:${s.color}"></span>
+            <div class="nm"><span>${s.name}</span><span class="d">${s.desc}</span></div>
+            <div class="amt">${wan(s.amt)}</div>
+            <div class="pct">${s.pct.toFixed(1)}%</div>
+          </div>`).join('')}
+      </div>
+    </div>
+  </div>
+
+  <div class="grid g2" style="align-items:start">
+    <div>
+      <div class="card">
+        <div class="card-h"><h3>诊断结论</h3><span class="sub">与当前持仓的偏离分析</span></div>
+        ${diagnostics.map(d => `<div class="diag ${d.ok?'ok':''}"><div class="h">${d.title}</div>${d.text}</div>`).join('')}
+        <div style="margin-top:12px;font-size:11.5px;color:var(--txt3);line-height:1.75">
+          计算说明：基准比例由风险等级决定，并按年龄（${age} 岁）与流动性需求（${liquid}）做两阶修正。所有比例可人工调整，调整理由会记入留痕。
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>执行节奏建议</h3><span class="sub">避免单点择时</span></div>
+        <div class="diag" style="border-left-color:var(--acc)">
+          <div class="h" style="color:var(--acc)">分 3 个月建仓</div>
+          每月执行约 ${wan(amount/3)}，优先补足低配项（${ACCOUNT_DEF.filter(a=>alloc[a.key].pct > (c.holdings.find(h=>h.n.includes(a.name.slice(0,2)))?.pct||0)).map(a=>a.name).slice(0,2).join('、') || '现金类'}）。
+        </div>
+        <div class="diag">
+          <div class="h">再平衡触发条件</div>
+          单一账户偏离目标超过 5pct，或权益类累计涨跌超 15% 时，做一次检查，不必频繁调整。
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h3>落地产品池</h3><span class="sub">仅从机构白名单取</span></div>
+      <div style="max-height:420px;overflow-y:auto;padding-right:4px">
+        ${renderProductPool(risk)}
+      </div>
+      <div style="margin-top:12px;font-size:11.5px;color:var(--amber);line-height:1.7">
+        ⚠ 以上为演示数据。实际产品池须经适当性校验，C${risk} 客户不可见风险等级高于其测评结果的产品。
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><h3>客户沟通脚本</h3><span class="sub">3 个最可能被追问的问题 + 建议回答</span>
+      <span class="right"><button class="btn sm ghost" data-act="alloc-reset">← 调整参数重算</button></span>
+    </div>
+    ${renderTalkScript(c, alloc, amount, risk)}
+  </div>
+
+  <div class="card">
+    <div class="card-h"><h3>一页纸建议书 · 客户版</h3><span class="sub">去掉内部标注，可直接导出</span>
+      <span class="right"><button class="btn sm primary" data-act="copy-proposal">复制建议书全文</button></span>
+    </div>
+    <div id="proposalText" style="font-size:12.8px;color:var(--txt2);line-height:1.95;background:#141b22;padding:16px 18px;border-radius:8px;border:1px solid #232e39">
+      ${proposalText(c, alloc, amount, risk)}
+    </div>
+  </div>`;
+}
+
+function renderProductPool(risk){
+  const maxRisk = {1:1, 2:2, 3:3, 4:4, 5:5}[risk];
+  const riskNum = {R1:1, R2:2, R3:3, R4:4, R5:5};
+  const pool = PRODUCT_POOL.filter(p => {
+    if (p.risk === '保障型') return true;
+    return riskNum[p.risk] <= maxRisk;
+  });
+  return pool.map(p => `
+    <div class="product-card">
+      <div class="pc-h">
+        <span class="pc-n">${p.name}</span>
+        <span class="tag-pill ${p.risk==='保障型'?'gold':''}">${p.risk}</span>
+      </div>
+      <div style="font-size:12px;color:var(--txt3)">${p.note}</div>
+      <div class="pc-meta">
+        <span>费率 <b>${p.fee}</b></span>
+        <span>申赎 <b>${p.period}</b></span>
+        <span>年化波动 <b>${p.vol}</b></span>
+      </div>
+    </div>`).join('');
+}
+
+function buildAllocDiagnostics(c, alloc, risk){
+  const out = [];
+  const curEq = c.holdings.filter(h => /权益|QDII/.test(h.n)).reduce((s,h) => s + h.pct, 0);
+  const newEq = alloc.equity.pct;
+  if (Math.abs(newEq - curEq) > 5){
+    out.push({
+      title:'权益配置调整',
+      text:`当前权益 ${curEq.toFixed(1)}%，建议目标 ${newEq.toFixed(1)}%，${newEq > curEq ? '需增加' : '需降低'} ${Math.abs(newEq-curEq).toFixed(1)}pct。建议分 2-3 次完成，避免单点择时。`
+    });
+  }
+  const curCash = c.holdings.filter(h => /现金|存款/.test(h.n)).reduce((s,h) => s + h.pct, 0);
+  if (curCash > alloc.cash.pct + 4){
+    out.push({
+      title:'闲置资金利用',
+      text:`当前现金 ${curCash.toFixed(1)}%，基准 ${alloc.cash.pct.toFixed(1)}%，超出 ${(curCash-alloc.cash.pct).toFixed(1)}pct。建议保留 3-6 个月开支后，其余转入现金管理类或短债。`
+    });
+  }
+  const curIns = c.holdings.filter(h => /增额|保险/.test(h.n)).reduce((s,h) => s + h.pct, 0);
+  if (alloc.ins.pct > curIns + 3){
+    out.push({
+      title:'长期确定性配置不足',
+      text:`保障与长期现金流当前 ${curIns.toFixed(1)}%，建议提升至 ${alloc.ins.pct.toFixed(1)}%。对高净值客户，这部分能对冲利率下行和长寿风险，也是传承架构的基础。`
+    });
+  }
+  if (c.risk <= 2 && risk > 2){
+    out.push({ title:'适当性提示', text:`客户测评等级为 C${c.risk}，本次方案按 C${risk} 计算，需确认测评结果是否已更新，否则不可执行。` });
+  }
+  if (!out.length){
+    out.push({ title:'结构基本合理', text:'当前持仓与建议方案偏离较小，维持现有结构并在半年做一次再平衡即可。', ok:true });
+  }
+  return out;
+}
+
+function renderTalkScript(c, alloc, amount, risk){
+  const items = [
+    {q:'"为什么现在要调整？我觉得现在放着也挺好"',
+     a:`"${c.name}${c.gender === '女' ? '女士' : '先生'}，我不建议您做大幅调整。这次方案的核心是把${alloc.cash.pct > 18 ? '闲置的现金用起来' : '权益部分的结构做分散'}。您现在有 ${wan(c.holdings.filter(h=>/现金|存款/.test(h.n))[0]?.v || 0)} 在活期和短期存款里，实际收益跑不赢通胀。我们只动这一部分，其余保持不动。"`},
+    {q:'"万一调整完又跌了怎么办？"',
+     a:`"这个担心很合理。所以方案里权益部分我建议分 3 次投，不一次性建仓。另外按 C${risk} 的风险等级，权益占比控制在 ${alloc.equity.pct.toFixed(0)}%，即使出现 20% 的市场回撤，对您总资产的影响也在 ${(alloc.equity.pct*0.2).toFixed(1)}% 左右，您的生活和现金流不会受影响。"`},
+    {q:'"这个方案能赚多少？"',
+     a:'"我不能承诺收益，这是监管要求，也是我不想误导您。我能给您的是：这个配置是根据您的风险测评、投资期限和流动性需求算出来的，每个比例都有依据。计划书里附了历史波动区间，您可以看到最差情况大概是什 么样。"'}
+  ];
+  return items.map((it, i) => `
+    <div class="obj-item ${i===0?'open':''}">
+      <div class="obj-q">客户可能问：${it.q}<span class="arrow">▶</span></div>
+      <div class="obj-a">${it.a}</div>
+    </div>`).join('');
+}
+
+function proposalText(c, alloc, amount, risk){
+  const rows = ACCOUNT_DEF.map(a => `
+    <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px dashed #232e39">
+      <span>${a.name}</span><span style="font-family:var(--mono)">${alloc[a.key].pct.toFixed(1)}% · ${wan(alloc[a.key].amt)}</span>
+    </div>`).join('');
+  return `
+    <div style="color:#fff;font-size:14px;font-weight:600;margin-bottom:10px">${c.name} ${c.gender === '女' ? '女士' : '先生'} · 资产配置建议书</div>
+    <div style="font-size:11.5px;color:var(--txt3);margin-bottom:14px">编制日期 2026-10-31 · 风险等级 C${risk} · 可投资金额 ${wan(amount)}</div>
+    <div style="margin-bottom:6px;color:#fff;font-weight:500">一、您的目标</div>
+    <div style="margin-bottom:14px">在控制波动的前提下实现资产稳健增值，同时保留合理的应急流动性。</div>
+    <div style="margin-bottom:6px;color:#fff;font-weight:500">二、建议配置</div>
+    ${rows}
+    <div style="margin:14px 0 6px;color:#fff;font-weight:500">三、执行方式</div>
+    <div>建议分 3 个月完成建仓，每月执行约 1/3，降低单点买入风险。</div>
+    <div style="margin:14px 0 6px;color:#fff;font-weight:500">四、需要您了解的风险</div>
+    <div>权益类资产可能出现阶段性回撤，本方案未做任何收益承诺。所有产品均经适当性匹配，可随时赎回部分（除封闭期产品）。</div>
+    <div style="margin-top:18px;padding-top:12px;border-top:1px solid #232e39;font-size:11px;color:var(--txt3)">
+      本建议书基于您提供的信息编制，不构成收益承诺。投资有风险，决策需谨慎。
+    </div>`;
+}
+</script>

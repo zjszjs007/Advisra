@@ -1,0 +1,585 @@
+<script>
+/* ==================== 视图：保险测算 v2 ==================== */
+let insV2 = {
+  clause: null,      // { fileName, numPages, data, found, fullText }
+  table: null,       // { fileName, columns, rows, source }
+  payYears: 5,
+  selectedCol: 0,
+  annual: 100000,
+  baseSA: 1000000,
+  calc: null,
+  step: 1
+};
+
+/* --- 主视图：快速测算在上，精算导入在下 --- */
+function renderInsurance(){
+  return `
+  <div class="view" id="view-insurance">
+    <div id="insCalcArea"></div>
+
+    <div class="section-divider">
+      <span class="line"></span>
+      <span class="txt">需要精确到合同数据？导入材料切换精算通道</span>
+      <span class="line"></span>
+    </div>
+
+    <div class="card" style="margin-bottom:0">
+      <div class="card-h">
+        <h3>精算通道 · 导入材料</h3>
+        <span class="sub">有条款与现金价值表时，算出的结果才可用于对客</span>
+        ${insV2.table ? '<span class="right tag-pill green">已载入数据</span>' : ''}
+      </div>
+      <div class="grid g2" style="align-items:start">
+        <div>
+          <div class="sub-h">① 导入条款 PDF<span class="hint">自动抽取 13 项产品要素</span></div>
+          <div id="clauseDrop" class="drop-zone compact">
+            <div class="dz-ico">📄</div>
+            <div class="dz-t">拖入条款 PDF，或点击选择</div>
+            <div class="dz-s">支持文本型 PDF；扫描件需先做 OCR</div>
+            <input type="file" id="clauseFile" accept=".pdf" hidden>
+          </div>
+          <div id="clauseResult"></div>
+        </div>
+        <div>
+          <div class="sub-h">② 导入现金价值表<span class="hint">xlsx / csv / pdf</span></div>
+          <div id="tableDrop" class="drop-zone compact">
+            <div class="dz-ico">📊</div>
+            <div class="dz-t">拖入现金价值表，或点击选择</div>
+            <div class="dz-s">支持 xlsx、csv；也可用同一份 PDF</div>
+            <input type="file" id="tableFile" accept=".xlsx,.csv,.pdf,.txt" hidden>
+          </div>
+          <div id="tableResult"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="preciseArea"></div>
+  </div>`;
+}
+
+/* --- 拖拽 & 选择绑定 --- */
+function bindInsuranceIO(){
+  const bind = (dropId, inputId, handler) => {
+    const drop = document.getElementById(dropId);
+    const input = document.getElementById(inputId);
+    if (!drop || !input) return;
+    drop.onclick = () => input.click();
+    input.onchange = e => { if (e.target.files[0]) handler(e.target.files[0]); };
+    drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+    drop.ondragleave = () => drop.classList.remove('over');
+    drop.ondrop = e => {
+      e.preventDefault(); drop.classList.remove('over');
+      if (e.dataTransfer.files[0]) handler(e.dataTransfer.files[0]);
+    };
+  };
+  bind('clauseDrop', 'clauseFile', handleClauseFile);
+  bind('tableDrop', 'tableFile', handleTableFile);
+}
+
+/* --- 处理条款 PDF --- */
+async function handleClauseFile(file){
+  const box = document.getElementById('clauseResult');
+  box.innerHTML = `<div class="parse-loading">正在解析 ${file.name} …</div>`;
+  try {
+    const pdf = await extractPdf(file);
+    // 无文本层：判定为扫描件/图片型 PDF，不能假装解析成功
+    const textLen = (pdf.fullText || '').replace(/\s/g, '').length;
+    if (textLen < 50){
+      insV2.clause = null;
+      box.innerHTML = `<div class="parse-err">
+        ✕ 该 PDF 没有文本层（共 ${pdf.numPages} 页），属于扫描件或图片型文件，无法直接抽取条款要素。<br>
+        <span style="color:var(--txt3)">处理方式：① 用可复制文本的电子版条款；② 先做 OCR 识别；③ 手工核对后直接导入现金价值表（xlsx / csv）继续测算。</span>
+      </div>`;
+      return;
+    }
+    const { data, found } = extractClauses(pdf.fullText);
+    insV2.clause = { fileName: file.name, numPages: pdf.numPages, data, found, fullText: pdf.fullText, pdf };
+
+    // 若 PDF 里也含现金价值表，自动尝试
+    let autoTable = null;
+    for (const p of pdf.pages){
+      const t = detectTable(p.rows);
+      if (t && t.rows.length >= 5){ autoTable = { ...t, source: `PDF 第 ${p.no} 页` }; break; }
+    }
+
+    box.innerHTML = `
+      <div class="parse-ok">
+        <div class="po-h">✓ 解析成功 · ${pdf.numPages} 页 · 抽取 ${found.length} 项要素</div>
+        <div class="po-list">
+          ${[...found.filter(f => !f.long), ...found.filter(f => f.long)].map(f => f.long
+            ? `<div class="po-row"><span class="k">${f.label}</span><span class="v">${escapeHtml(f.value.slice(0, 46))}…<span class="po-more" data-more='${escapeHtml(JSON.stringify(f.value))}'>展开</span></span></div>`
+            : `<div class="po-row"><span class="k">${f.label}</span><span class="v">${escapeHtml(f.value)}</span></div>`).join('')}
+        </div>
+        ${autoTable ? `<div class="po-note">检测到内嵌现金价值表（${autoTable.rows.length} 个年度），已自动载入</div>` : ''}
+      </div>`;
+    box.querySelectorAll('[data-more]').forEach(el => {
+      el.onclick = () => {
+        const span = el.parentElement;
+        const full = JSON.parse(el.dataset.more);
+        if (el.textContent === '展开'){
+          span.innerHTML = escapeHtml(full) + '<span class="po-more">收起</span>';
+          span.querySelector('.po-more').onclick = () => { span.innerHTML = escapeHtml(full.slice(0,46)) + '…<span class="po-more">展开</span>'; reBind(); };
+        }
+      };
+    });
+    function reBind(){
+      box.querySelectorAll('[data-more]').forEach(x => { if (x.textContent==='展开') x.click(); });
+    }
+    if (autoTable && !insV2.table){
+      insV2.table = autoTable;
+      insV2.selectedCol = 0;
+      renderTableResult();
+    }
+    updateInsSteps();
+    refreshCalcArea();
+  } catch (err){
+    box.innerHTML = `<div class="parse-err">✕ 解析失败：${escapeHtml(err.message)}</div>`;
+  }
+}
+
+/* --- 处理现金价值表 --- */
+async function handleTableFile(file){
+  const box = document.getElementById('tableResult');
+  box.innerHTML = `<div class="parse-loading">正在解析 ${file.name} …</div>`;
+  try {
+    let table = null, source = '';
+    const lower = file.name.toLowerCase();
+
+    if (lower.endsWith('.xlsx')){
+      const sheets = await parseXlsx(await file.arrayBuffer());
+      for (const sh of sheets){
+        const t = detectTable(sh.rows);
+        if (t && t.rows.length >= 3){
+          table = { ...t, sheetName: sh.name };
+          source = `工作表「${sh.name}」`;
+          break;
+        }
+      }
+      if (!table) throw new Error('未在 Excel 中找到「保单年度 + 现金价值」结构的表格');
+    } else if (lower.endsWith('.csv') || lower.endsWith('.txt')){
+      const text = await file.text();
+      const rows = parseCsv(text);
+      table = detectTable(rows);
+      if (!table) throw new Error('未在 CSV 中识别到现金价值表结构');
+      source = 'CSV 文件';
+    } else if (lower.endsWith('.pdf')){
+      const pdf = await extractPdf(file);
+      for (const p of pdf.pages){
+        const t = detectTable(p.rows);
+        if (t && t.rows.length >= 3){ table = t; source = `PDF 第 ${p.no} 页`; break; }
+      }
+      if (!table){
+        // 二次尝试：从纯文本中抓取
+        const grabbed = rowsFromPdfText(pdf.fullText);
+        if (grabbed.length >= 3){
+          const mapped = grabbed.map(g => ({ year: g.year, cv: g.nums }));
+          table = { headerIdx: -1, columns: ['金额1', '金额2', '金额3'].slice(0, mapped[0].cv.length), rows: mapped };
+          source = 'PDF 文本提取（需人工核对）';
+        }
+      }
+      if (!table) throw new Error('未识别到现金价值表；若为扫描件，请改用 xlsx/csv');
+    } else {
+      throw new Error('不支持的文件格式');
+    }
+
+    insV2.table = { ...table, fileName: file.name, source };
+    insV2.selectedCol = 0;
+    renderTableResult();
+    updateInsSteps();
+    refreshCalcArea();
+  } catch (err){
+    box.innerHTML = `<div class="parse-err">✕ ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+/* 步骤条状态：按实际完成情况刷新 */
+function updateInsSteps(){
+  const steps = document.querySelectorAll('#view-insurance .wstep');
+  if (steps.length < 4) return;
+  const done = [!!insV2.clause, !!insV2.table, !!insV2.table && !!insV2.calc, !!insV2.calc];
+  const current = done.findIndex(v => !v);
+  steps.forEach((el, i) => {
+    el.classList.toggle('done', done[i]);
+    el.classList.toggle('on', current === i);
+  });
+  if (current < 0) steps.forEach((el, i) => { el.classList.toggle('done', done[i]); el.classList.toggle('on', i === 3); });
+}
+
+function renderTableResult(){
+  const box = document.getElementById('tableResult');
+  const t = insV2.table;
+  if (!box || !t) return;
+  const cols = t.columns.length ? t.columns : ['现金价值'];
+  const preview = t.rows.slice(0, 5);
+  box.innerHTML = `
+    <div class="parse-ok">
+      <div class="po-h">✓ 识别到 ${t.rows.length} 个保单年度 · 来源：${escapeHtml(t.source || '文件')}</div>
+      ${cols.length > 1 ? `
+        <div class="po-note">该表含 ${cols.length} 组现金价值（对应不同缴费期），请选择本次测算使用的列：</div>
+        <div class="col-pick">
+          ${cols.map((c, i) => `<span class="chip ${i === insV2.selectedCol ? 'on' : ''}" data-colfix="${i}">${escapeHtml(c)}</span>`).join('')}
+        </div>` : ''}
+      <table class="data-tbl" style="margin-top:9px">
+        <thead><tr><th>保单年度</th>${cols.map(c => `<th>${escapeHtml(c)}</th>`).join('')}<th>累计已交</th></tr></thead>
+        <tbody>
+          ${preview.map(r => `<tr>
+            <td>第 ${r.year} 年</td>
+            ${(r.cv || []).slice(0, cols.length).map(v => `<td>${v == null ? '—' : fmtMoney(v)}</td>`).join('')}
+            <td>${r.paid == null ? '—' : fmtMoney(r.paid)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+      ${t.rows.length > 5 ? `<div class="po-note">仅显示前 5 行，共 ${t.rows.length} 行</div>` : ''}
+    </div>`;
+
+  box.querySelectorAll('[data-colfix]').forEach(el => {
+    el.onclick = () => {
+      insV2.selectedCol = +el.dataset.colfix;
+      renderTableResult();
+      refreshCalcArea();
+    };
+  });
+}
+
+function fmtMoney(v){
+  if (v == null) return '—';
+  return Math.round(v).toLocaleString('zh-CN');
+}
+function escapeHtml(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/* --- 参数与测算区 --- */
+function refreshCalcArea(){
+  const quickArea = document.getElementById('insCalcArea');
+  const preciseArea = document.getElementById('preciseArea');
+  if (!quickArea) return;
+
+  // 快速测算区始终渲染在上方
+  quickArea.innerHTML = renderQuickCalc();
+  bindQuickCalc();
+
+  const t = insV2.table;
+  const c = insV2.clause;
+  if (!t){
+    if (preciseArea) preciseArea.innerHTML = '';
+    return;
+  }
+  const area = preciseArea || quickArea;
+  const maxYear = t.rows[t.rows.length - 1].year;
+  const colLabel = t.columns[insV2.selectedCol] || '现金价值';
+
+  // 从列名推断缴费期，并据此推算年缴保费，避免"选了 5 年交却按 3 年交保费算"的错配
+  const payGuess = (colLabel.match(/(\d{1,2})\s*年交/) || [])[1];
+  if (payGuess) insV2.payYears = +payGuess;
+  const derived = deriveAnnual(t, insV2.selectedCol, insV2.payYears);
+  if (derived && Math.abs(derived - insV2.annual) > 1) insV2.annual = derived;
+  insV2.autoDerived = !!derived;
+
+  area.innerHTML = `
+    <div class="card">
+      <div class="card-h"><h3>③ 测算参数</h3>
+        <span class="sub">${c ? escapeHtml(c.data.productName || '未识别产品名') : '未导入条款'}</span>
+        <span class="right">数据至第 ${maxYear} 保单年度</span>
+      </div>
+      <div class="form-grid" style="grid-template-columns:repeat(5,1fr)">
+        <div class="field"><label>缴费期（年）</label>
+          <input type="number" id="p_pay" value="${insV2.payYears}" min="1" max="30">
+        </div>
+        <div class="field"><label>年缴保费（元）</label>
+          <input type="number" id="p_annual" value="${insV2.annual}" step="1000">
+        </div>
+        <div class="field"><label>基本保险金额（元）</label>
+          <input type="number" id="p_sa" value="${insV2.baseSA}" step="10000">
+        </div>
+        <div class="field"><label>保额递增率（%）</label>
+          <input type="number" id="p_inc" value="${c && c.data.increaseRate ? c.data.increaseRate : 3}" step="0.1">
+        </div>
+        <div class="field"><label>测算至第 N 年</label>
+          <input type="number" id="p_horizon" value="${Math.min(maxYear, 40)}" min="2" max="${maxYear}">
+        </div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+        <button class="btn primary" data-act="ins-run2">开始测算</button>
+        <button class="btn ghost" data-act="ins-clear">清空重来</button>
+        <span style="font-size:11.5px;color:var(--txt3)">使用「${escapeHtml(colLabel)}」列 · 保费按保单年度期初缴纳</span>
+      </div>
+      ${insV2.autoDerived
+        ? `<div class="po-note" style="margin-top:8px">年缴保费已按表中「累计已交保费 ÷ 缴费期」自动推算为 ${fmtMoney(insV2.annual)} 元；如与计划书不符，请手动修改。</div>`
+        : `<div class="po-note" style="margin-top:8px;color:var(--amber)">⚠ 该表未提供保费信息，请按保险合同手工填写年缴保费。IRR 对保费高度敏感，填错会导致结果失真。</div>`}
+    </div>
+    <div id="insResultP"></div>`;
+
+  ['p_pay','p_annual','p_sa','p_inc','p_horizon'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.onchange = () => { /* 值在点击时读取 */ };
+  });
+  if (insV2.calc) renderCalcResult();
+}
+
+/* 从表中反推年缴保费：优先用"累计已交保费"列，其次用"年交保费"列 */
+function deriveAnnual(table, colIdx, payYears){
+  if (!table || !table.rows.length) return 0;
+  const rows = table.rows;
+  // 1) 表中直接有"累计已交保费"列：最可靠
+  const withPaid = rows.filter(r => r.paid != null && r.paid > 0);
+  if (withPaid.length){
+    const inPay = withPaid.filter(r => r.year <= payYears);
+    const base = inPay.length ? inPay[inPay.length - 1] : withPaid[0];
+    const years = Math.min(base.year, payYears);
+    if (years > 0) return Math.round(base.paid / years);
+  }
+  // 2) 表中有"年交保费"列
+  const withAnnual = rows.find(r => r.annual != null && r.annual > 0);
+  if (withAnnual) return withAnnual.annual;
+  // 3) 没有保费信息 → 不猜，交由用户填写
+  return 0;
+}
+
+/* 合理性校验：IRR 超过该阈值时提示用户核对保费
+   增额终身寿长期 IRR 行业区间约 1.5% ~ 3.5%，超过 6% 基本可判定保费填错 */
+function sanityCheckIRR(irr){
+  if (irr == null) return { ok: true };
+  if (irr > 0.06) return { ok: false, msg: '测算 IRR 高达 ' + (irr*100).toFixed(2) + '%，远超增额寿/年金险的行业区间（约 1.5%–3.5%）。极可能是年缴保费与现金价值表不匹配，请核对后再用于对客。' };
+  if (irr < -0.5) return { ok: false, msg: 'IRR 异常偏低，请检查缴费期与保费是否填写正确。' };
+  return { ok: true };
+}
+
+/* --- 执行测算 --- */
+function runInsuranceCalc(){
+  const t = insV2.table;
+  if (!t) return;
+  const payYears = Math.max(1, +document.getElementById('p_pay').value || 5);
+  const annual   = Math.max(0, +document.getElementById('p_annual').value || 0);
+  if (!annual){
+    toast('请先填写年缴保费：表中未提供保费信息时，IRR 无法计算');
+    document.getElementById('p_annual')?.focus();
+    return;
+  }
+  const baseSA   = Math.max(0, +document.getElementById('p_sa').value || 0);
+  const incRate  = +document.getElementById('p_inc').value || 3;
+  const maxYear  = t.rows[t.rows.length - 1].year;
+  const horizon  = Math.min(maxYear, Math.max(2, +document.getElementById('p_horizon').value || 30));
+
+  const col = insV2.selectedCol;
+  const cvOf = y => {
+    const r = t.rows.find(x => x.year === y);
+    if (!r || !r.cv) return null;
+    const v = r.cv[col];
+    return v == null ? (r.cv[0] ?? null) : v;
+  };
+
+  // 累计已交保费
+  const paidOf = y => Math.min(y, payYears) * annual;
+
+  const rows = [];
+  for (let y = 1; y <= horizon; y++){
+    const cv = cvOf(y);
+    if (cv == null) continue;
+    const paid = paidOf(y);
+    rows.push({
+      year: y,
+      paid,
+      cv,
+      ratio: paid ? cv / paid : null,
+      effSA: effectiveSA(baseSA, incRate, y),
+      deathBenefit: Math.max(baseSA, cv, paid),
+      irr: null
+    });
+  }
+  if (!rows.length) { toast('未取到有效的现金价值数据'); return; }
+
+  // 逐年度 IRR
+  rows.forEach(r => {
+    const cf = buildCashflows(annual, payYears, r.cv, r.year);
+    r.irr = calcIRR(cf);
+  });
+
+  const be = findBreakEven(t.rows, payYears, annual);
+  const last = rows[rows.length - 1];
+  const c = insV2.clause;
+
+  insV2.calc = {
+    rows, be, last, payYears, annual, baseSA, incRate, horizon, colLabel: t.columns[col] || '现金价值',
+    totalPaid: annual * Math.min(payYears, horizon)
+  };
+  renderCalcResult();
+  updateInsSteps();
+
+  // 关键指标卡
+  const irr30 = rows.find(r => r.year === 30)?.irr ?? last.irr;
+  const node = document.getElementById('insResultP');
+  if (node) node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderCalcResult(){
+  const s = insV2.calc;
+  const box = document.getElementById('insResultP');
+  if (!box || !s) return;
+
+  const irr30 = s.rows.find(r => r.year === 30)?.irr;
+  const irr20 = s.rows.find(r => r.year === 20)?.irr;
+  const irr10 = s.rows.find(r => r.year === 10)?.irr;
+  const keyRow = s.rows.reduce((acc, r) => r.irr != null ? r : acc, null);
+
+  const irr30chk = s.rows.find(r => r.year === 30)?.irr ?? s.last.irr;
+  const chk = sanityCheckIRR(irr30chk);
+  const warnHtml = chk.ok ? '' : `<div class="compliance-box warn" style="margin-bottom:12px">⚠ ${chk.msg}</div>`;
+
+  box.innerHTML = `
+    <div class="card has-sticky">
+      ${warnHtml}
+      <div class="card-h"><h3>④ 测算结果</h3>
+        <span class="sub">${s.payYears} 年交 · 年缴 ${fmtMoney(s.annual)} 元 · 使用「${escapeHtml(s.colLabel)}」</span>
+      </div>
+      <div class="big-num">
+        <div class="big-item">
+          <div class="k">回本年限</div>
+          <div class="v">${s.be ? s.be.year : '—'}<small>年</small></div>
+        </div>
+        <div class="big-item">
+          <div class="k">10 年 IRR</div>
+          <div class="v">${fmtIrr(irr10)}<small>%</small></div>
+        </div>
+        <div class="big-item">
+          <div class="k">20 年 IRR</div>
+          <div class="v">${fmtIrr(irr20)}<small>%</small></div>
+        </div>
+        <div class="big-item">
+          <div class="k">30 年 IRR</div>
+          <div class="v">${fmtIrr(irr30)}<small>%</small></div>
+        </div>
+        <div class="big-item">
+          <div class="k">第 ${s.last.year} 年现金价值</div>
+          <div class="v">${(s.last.cv / 10000).toFixed(1)}<small>万</small></div>
+        </div>
+      </div>
+
+      <div style="margin:4px 0 10px;font-size:12px;color:var(--txt3)">现金价值 / 累计已交保费 / 身故保险金（元）</div>
+      <div id="insChart2"></div>
+
+      <div class="sticky-tbl">
+      <table class="data-tbl" style="margin-top:16px">
+        <thead><tr>
+          <th>保单年度</th><th>累计已交保费</th><th>现金价值</th><th>现金价值/已交</th>
+          <th>当年 IRR</th><th>有效保额</th><th>身故赔付</th>
+        </tr></thead>
+        <tbody>
+          ${s.rows.filter(r => r.year <= 5 || r.year % 5 === 0 || r.year === s.rows.length).map(r => `
+            <tr>
+              <td>第 ${r.year} 年</td>
+              <td>${fmtMoney(r.paid)}</td>
+              <td style="color:${r.cv >= r.paid ? 'var(--gold)' : 'var(--txt)'}">${fmtMoney(r.cv)}</td>
+              <td>${r.ratio == null ? '—' : (r.ratio * 100).toFixed(1) + '%'}</td>
+              <td>${r.year < s.payYears && r.cv < r.paid ? '<span style="color:var(--red)">亏损</span>' : fmtIrr(r.irr) + '%'}</td>
+              <td>${fmtMoney(Math.round(r.effSA))}</td>
+              <td>${fmtMoney(r.deathBenefit)}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      </div>
+      <div style="margin-top:11px;font-size:11.5px;color:var(--txt3);line-height:1.8">
+        计算口径：保费于各保单年度期初缴纳，第 N 年末退保取回当年现金价值；IRR 为年化内部收益率。
+        身故赔付取「基本保额 / 现金价值 / 已交保费」三者较大值。数据直接来自您导入的现金价值表，未经任何拟合或调整。
+      </div>
+    </div>
+
+    ${s.be ? `
+    <div class="card">
+      <div class="card-h"><h3>关键节点解读</h3><span class="sub">基于真实数据自动生成</span></div>
+      <div class="diag" style="border-left-color:var(--amber)">
+        <div class="h">第 ${s.be.year} 年回本</div>
+        累计已交保费 ${fmtMoney(s.be.paid)} 元，当年现金价值 ${fmtMoney(s.be.cv)} 元。
+        在此之前退保会损失本金，须向客户明确说明。
+      </div>
+      ${irr30 ? `<div class="diag ok"><div class="h">长期 IRR 约 ${fmtIrr(irr30)}%</div>
+        按导入的现金价值表，持有至第 30 年的年化收益率为 ${fmtIrr(irr30)}%。该数字由表格数据直接计算，与保险公司计划书口径一致。</div>` : ''}
+      <div class="diag">
+        <div class="h">保单贷款额度</div>
+        以第 ${Math.min(20, s.last.year)} 年末现金价值 ${fmtMoney(s.rows.find(r=>r.year===Math.min(20,s.last.year))?.cv || 0)} 元计，
+        按 80% 贷款比例可贷约 ${fmtMoney(Math.round((s.rows.find(r=>r.year===Math.min(20,s.last.year))?.cv || 0) * 0.8))} 元。
+      </div>
+    </div>` : ''}
+
+    <div class="card">
+      <div class="card-h"><h3>客户版话术</h3><span class="sub">数字来自本次测算</span>
+        <span class="right"><button class="btn sm ghost" data-act="copy-ins2">复制话术</button></span>
+      </div>
+      <div class="human-talk" id="insTalk">
+        <div class="lab">关于回本</div>
+        这份计划书里写得很清楚：您每年交 ${fmtMoney(s.annual)} 元，交 ${s.payYears} 年，一共 ${fmtMoney(s.totalPaid)} 元。
+        到第 ${s.be ? s.be.year : '—'} 年，保单里的钱才超过您交的钱。所以前 ${s.be ? s.be.year - 1 : 10} 年如果退保，是会亏本金的，这笔钱要用长期不动的闲钱。
+      </div>
+      <div class="human-talk">
+        <div class="lab">关于收益</div>
+        放到第 ${s.rows.find(r=>r.year===30)?.year || s.last.year} 年，合同里的现金价值是 ${fmtMoney(s.rows.find(r=>r.year===30)?.cv || s.last.cv)} 元，
+        折算成年化大约是 ${fmtIrr(s.rows.find(r=>r.year===30)?.irr ?? s.last.irr)}%。这个数不是我们算出来的估计值，是按合同附表的现金价值倒推的，白纸黑字写在那里。
+      </div>
+      <div class="human-talk">
+        <div class="lab">关于灵活性</div>
+        急用钱有三个办法：保单贷款最多能贷出现金价值的 80%；也可以申请减保取一部分；或者等到回本年度之后再动。所以建议只把确定长期不用的钱放进来。
+      </div>
+    </div>`;
+  setTimeout(drawInsChart2, 20);
+}
+
+function fmtIrr(v){
+  if (v == null || isNaN(v)) return '—';
+  return (v * 100).toFixed(2);
+}
+
+/* --- 图表：双轴折线 --- */
+function drawInsChart2(){
+  const box = document.getElementById('insChart2');
+  const s = insV2.calc;
+  if (!box || !s) return;
+  const pts = s.rows;
+  const W = box.clientWidth || 640, H = 200, padL = 58, padB = 26, padT = 12, padR = 12;
+  const maxV = Math.max(...pts.map(p => Math.max(p.cv, p.paid, p.deathBenefit))) * 1.06;
+
+  const x = i => padL + (pts.length > 1 ? i / (pts.length - 1) : 0.5) * (W - padL - padR);
+  const y = v => padT + (1 - v / maxV) * (H - padT - padB);
+
+  // Y 轴取整
+  const rawStep = maxV / 4 / 10000;
+  const stepWan = rawStep <= 10 ? 10 : rawStep <= 20 ? 20 : rawStep <= 30 ? 25 : rawStep <= 50 ? 50 : Math.ceil(rawStep / 100) * 100;
+  const topWan = Math.ceil(maxV / 10000 / stepWan) * stepWan;
+  const ticks = [];
+  for (let v = 0; v <= topWan; v += stepWan) ticks.push(v);
+
+  const grid = ticks.map(vw => `
+    <line x1="${padL}" y1="${y(vw*10000)}" x2="${W-padR}" y2="${y(vw*10000)}" stroke="#232e39"/>
+    <text x="${padL-7}" y="${y(vw*10000)+3.5}" fill="#6b7d8f" font-size="9.5" text-anchor="end" font-family="monospace">${vw}</text>`).join('')
+    + `<text x="${padL-7}" y="${padT-2}" fill="#6b7d8f" font-size="9" text-anchor="end">万元</text>`;
+
+  const path = (key, color, dash) => {
+    const d = pts.map((p, i) => `${i===0?'M':'L'}${x(i).toFixed(1)},${y(p[key]).toFixed(1)}`).join(' ');
+    return `<path d="${d}" fill="none" stroke="${color}" stroke-width="${dash?1.4:2}" ${dash?`stroke-dasharray="${dash}"`:''}/>`;
+  };
+  const area = (() => {
+    const d = pts.map((p, i) => `${i===0?'M':'L'}${x(i).toFixed(1)},${y(p.cv).toFixed(1)}`).join(' ');
+    return `<path d="${d} L${x(pts.length-1).toFixed(1)},${y(0)} L${x(0).toFixed(1)},${y(0)} Z" fill="url(#cvG2)"/>`;
+  })();
+
+  const xLabels = [0, Math.floor(pts.length/3), Math.floor(pts.length*2/3), pts.length-1]
+    .filter((v,i,a) => a.indexOf(v)===i)
+    .map(i => `<text x="${x(i)}" y="${H-7}" fill="#6b7d8f" font-size="9.5" text-anchor="middle" font-family="monospace">${pts[i].year}年</text>`).join('');
+
+  box.innerHTML = `<svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="display:block">
+    <defs><linearGradient id="cvG2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#d4a24c" stop-opacity="0.26"/>
+      <stop offset="100%" stop-color="#d4a24c" stop-opacity="0"/>
+    </linearGradient></defs>
+    ${grid}${area}
+    ${path('paid','#5a7d99','4 3')}
+    ${path('deathBenefit','#a08cd4','2 3')}
+    ${path('cv','#d4a24c')}
+    ${xLabels}
+  </svg>
+  <div class="legend" style="margin-top:2px">
+    <span class="legend-i"><span style="width:14px;height:2px;background:#d4a24c;display:inline-block"></span>现金价值</span>
+    <span class="legend-i"><span style="width:14px;height:2px;background:#5a7d99;display:inline-block"></span>累计已交保费</span>
+    <span class="legend-i"><span style="width:14px;height:2px;background:#a08cd4;display:inline-block"></span>身故赔付</span>
+  </div>`;
+}
+</script>

@@ -1,0 +1,29 @@
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+
+# 依赖与构建缓存
+node_modules/
+.cache/
+
+# 临时测试与截图
+_qa/
+_v/
+*.png
+*.jpg
+!docs/**/*.png
+
+# Office 临时文件
+~$*.docx
+~$*.xlsx
+
+# 平台产物元数据（Box-Agent / 本地工具生成）
+.*.artifact.json
+
+# 日志
+*.log
+npm-debug.log*

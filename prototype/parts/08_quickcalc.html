@@ -1,0 +1,281 @@
+<script>
+/* ==================== 通道 B：快速测算（未上传文件时） ==================== */
+/* 经验参数：行业公开产品的大致区间，仅用于快速建立预期，不可用于对客 */
+const QUICK_PRESETS = {
+  zeng_e:  { label:'增额终身寿', beBase:10, irrLow:2.0, irrHigh:2.5, curvePow:1.9, firstYr:0.28, note:'现金价值写进合同，确定性最高' },
+  nianjin: { label:'养老年金',   beBase:12, irrLow:1.8, irrHigh:2.4, curvePow:2.2, firstYr:0.22, note:'领取期前现金价值爬坡较慢' },
+  dingshou:{ label:'定期寿险',   beBase:null, irrLow:null, irrHigh:null, curvePow:1.4, firstYr:0.10, note:'纯保障型，无储蓄功能' }
+};
+
+let quickState = { type:'zeng_e', payYears:5, annual:100000, beAdj:0, irrAdj:0, age:36 };
+
+function renderQuickCalc(){
+  const p = QUICK_PRESETS[quickState.type];
+  const isProtect = quickState.type === 'dingshou';
+  const midIrr = p.irrLow == null ? null : ((p.irrLow + p.irrHigh) / 2 + quickState.irrAdj);
+
+  return `
+  <div class="card">
+    <div class="card-h"><h3>③ 快速测算</h3>
+      <span class="sub">未上传文件时，按险种经验值估算</span>
+      <span class="right"><span class="tag-pill amber">估算 · 不可对客</span></span>
+    </div>
+    <div class="compliance-box" style="margin-bottom:14px;background:#2e2615;border-color:#4a3f22;color:#d8c48a">
+      ⚠ 当前为经验值测算，非合同数据。用于快速判断「值不值得进一步测算」，结果不得用于对客承诺。
+    </div>
+    <div class="form-grid" style="grid-template-columns:repeat(4,1fr)">
+      <div class="field"><label>险种</label>
+        <select id="q_type">
+          ${Object.keys(QUICK_PRESETS).map(k => `<option value="${k}" ${k===quickState.type?'selected':''}>${QUICK_PRESETS[k].label}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>缴费期（年）</label>
+        <select id="q_pay">
+          ${[3,5,10].map(y => `<option value="${y}" ${y===quickState.payYears?'selected':''}>${y} 年交</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>年缴保费（元）</label>
+        <input type="number" id="q_annual" value="${quickState.annual}" step="10000" ${isProtect?'disabled':''}>
+      </div>
+      <div class="field"><label>被保险人年龄</label>
+        <input type="number" id="q_age" value="${quickState.age}" min="0" max="99">
+      </div>
+    </div>
+    ${isProtect ? `<div class="po-note" style="margin-top:10px">定期寿险为纯保障型产品，不含储蓄功能，无 IRR 与回本概念。可测算保障杠杆。</div>` : `
+    <div class="grid g2" style="margin-top:14px">
+      <div class="field"><label>回本年限偏移：${quickState.beAdj > 0 ? '+' : ''}${quickState.beAdj} 年</label>
+        <input type="range" id="q_beadj" min="-3" max="5" value="${quickState.beAdj}" style="width:100%;padding:0">
+        <div class="po-note" style="margin-top:5px">基准：第 ${p.beBase + quickState.beAdj + (quickState.age>=55?1:0)} 年回本 · ${p.note}</div>
+      </div>
+      <div class="field"><label>长期 IRR 调整：${quickState.irrAdj > 0 ? '+' : ''}${quickState.irrAdj.toFixed(1)} pct</label>
+        <input type="range" id="q_irradj" min="-0.8" max="1.2" step="0.1" value="${quickState.irrAdj}" style="width:100%;padding:0">
+        <div class="po-note" style="margin-top:5px">区间：${(p.irrLow + quickState.irrAdj).toFixed(1)}% ~ ${(p.irrHigh + quickState.irrAdj).toFixed(1)}%（中值 ${midIrr.toFixed(2)}%）</div>
+      </div>
+    </div>`}
+    <div style="margin-top:14px;display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+      <button class="btn primary" data-act="q-run">快速估算</button>
+      <span style="font-size:11.5px;color:var(--txt3)">或在上方导入真实材料，切换为精算通道</span>
+    </div>
+  </div>
+  <div id="quickResult"></div>`;
+}
+
+function bindQuickCalc(){
+  ['q_type','q_pay','q_annual','q_age'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.onchange = () => {
+      if (id === 'q_type') quickState.type = el.value;
+      if (id === 'q_pay') quickState.payYears = +el.value;
+      if (id === 'q_annual') quickState.annual = +el.value || 0;
+      if (id === 'q_age') quickState.age = +el.value || 36;
+      refreshCalcArea();
+    };
+  });
+  const be = document.getElementById('q_beadj');
+  if (be) be.oninput = () => { quickState.beAdj = +be.value; refreshCalcArea(); };
+  const ir = document.getElementById('q_irradj');
+  if (ir) ir.oninput = () => { quickState.irrAdj = +ir.value; refreshCalcArea(); };
+}
+
+/* 反推现金价值曲线：以「回本年限 + 长期 IRR」两个锚点拟合 */
+function quickCurve(type, payYears, annual, age){
+  const p = QUICK_PRESETS[type];
+  const be = Math.max(payYears + 2, (p.beBase || 10) + quickState.beAdj + (age >= 55 ? 1 : 0));
+  const total = annual * payYears;
+  const targetIrr = (((p.irrLow + p.irrHigh) / 2) + quickState.irrAdj) / 100;
+
+  const irrOf = cv40 => {
+    const cf = [];
+    for (let t = 0; t <= 40; t++){
+      let v = 0;
+      if (t < payYears) v -= annual;
+      if (t === 40) v += cv40;
+      cf.push(v);
+    }
+    return calcIRR(cf) || 0;
+  };
+  let lo = total, hi = total * 12;
+  for (let i = 0; i < 80; i++){
+    const mid = (lo + hi) / 2;
+    if (irrOf(mid) < targetIrr) lo = mid; else hi = mid;
+  }
+  const cv40 = (lo + hi) / 2;
+
+  const rows = [];
+  for (let y = 1; y <= 40; y++){
+    let cv;
+    if (y <= be){
+      // 以「首年现值 = 保费的 firstYr」为起点、回本年末为终点做幂函数插值
+      const startCv = annual * (p.firstYr || 0.25);
+      const endCv = total * 1.015;
+      const t = Math.pow((y - 0.5) / (be - 0.5), p.curvePow);
+      cv = startCv + (endCv - startCv) * t;
+    } else {
+      const start = total * 1.015;
+      const t = (y - be) / (40 - be);
+      cv = start + (cv40 - start) * Math.pow(t, 0.88);
+    }
+    rows.push({ year: y, paid: Math.min(y, payYears) * annual, cv: Math.round(cv), irr: null });
+  }
+  rows.forEach(r => {
+    const cf = [];
+    for (let t = 0; t <= r.year; t++){
+      let v = 0;
+      if (t < payYears) v -= annual;
+      if (t === r.year) v += r.cv;
+      cf.push(v);
+    }
+    r.irr = calcIRR(cf);
+  });
+  return rows;
+}
+
+function runQuickCalc(){
+  const annual = +document.getElementById('q_annual').value || 0;
+  const age = +document.getElementById('q_age').value || 36;
+  const payYears = quickState.payYears;
+  const type = quickState.type;
+  const box = document.getElementById('quickResult');
+  if (!box) return;
+
+  if (type === 'dingshou'){
+    const multiple = 20;
+    const sa = annual * multiple;
+    box.innerHTML = `
+      <div class="card">
+        <div class="card-h"><h3>保障杠杆测算</h3><span class="right">${age} 岁 · 年缴 ${fmtMoney(annual)} 元</span></div>
+        <div class="big-num">
+          <div class="big-item"><div class="k">年缴保费</div><div class="v">${(annual/10000).toFixed(1)}<small>万</small></div></div>
+          <div class="big-item"><div class="k">可获保额（约 ${multiple} 倍）</div><div class="v">${(sa/10000).toFixed(0)}<small>万</small></div></div>
+          <div class="big-item"><div class="k">杠杆倍数</div><div class="v">${multiple}<small>倍</small></div></div>
+        </div>
+        <div class="diag" style="border-left-color:var(--amber)">
+          <div class="h">说明</div>
+          定期寿险为纯消费型保障，保费随年龄与健康状况变化显著。此处倍数为行业粗略经验值，实际保额须以核保结果与费率表为准。
+        </div>
+      </div>`;
+    scrollToQuickResult();
+    return;
+  }
+
+  const p = QUICK_PRESETS[type];
+  const rows = quickCurve(type, payYears, annual, age);
+  const beRow = rows.find(r => r.cv >= r.paid);
+  const last = rows[rows.length - 1];
+  const irr20 = rows.find(r => r.year === 20)?.irr;
+  const irr30 = rows.find(r => r.year === 30)?.irr;
+  const midIrr = ((p.irrLow + p.irrHigh) / 2) + quickState.irrAdj;
+
+  box.innerHTML = `
+    <div class="result-split">
+      <div class="card">
+        <div class="card-h"><h3>快速估算结果</h3>
+          <span class="sub">${p.label} · ${payYears} 年交 · 年缴 ${fmtMoney(annual)} 元</span>
+          <span class="right"><span class="tag-pill amber">估算值</span></span>
+        </div>
+        <div class="big-num">
+          <div class="big-item"><div class="k">回本年限（估）</div><div class="v">${beRow ? beRow.year : '—'}<small>年</small></div></div>
+          <div class="big-item"><div class="k">20 年 IRR（估）</div><div class="v">${fmtIrr(irr20)}<small>%</small></div></div>
+          <div class="big-item"><div class="k">30 年 IRR（估）</div><div class="v">${fmtIrr(irr30)}<small>%</small></div></div>
+          <div class="big-item"><div class="k">40 年现金价值（估）</div><div class="v">${(last.cv/10000).toFixed(0)}<small>万</small></div></div>
+        </div>
+
+        <div class="chart-title">现金价值 vs 已交保费（万元）</div>
+        <div id="quickChartBox"></div>
+
+        <div class="diag" style="border-left-color:var(--amber);margin-top:14px">
+          <div class="h">这个数字怎么来的</div>
+          以「第 ${beRow ? beRow.year : p.beBase} 年回本」与「长期 IRR ${midIrr.toFixed(2)}%」两个经验锚点反推现金价值曲线，<b>非合同数据</b>。
+          真实产品的回本年限可能相差 1–3 年，IRR 可能相差 0.3–0.8 个百分点。
+        </div>
+        <div class="compliance-box warn" style="margin-top:10px">
+          ⛔ 本结果为经验估算，不得用于对客承诺。请以保险合同附表的现金价值为准。
+        </div>
+        <div style="margin-top:14px">
+          <button class="btn sm primary" data-act="q-scroll-import">材料已到手，切换精算复核 →</button>
+        </div>
+      </div>
+
+      <div class="card has-sticky">
+        <div class="card-h"><h3>年度明细</h3>
+          <span class="sub">估算值</span>
+          ${rows.length > 14 ? '<span class="right scroll-hint">↓ 表格可滚动</span>' : ''}
+        </div>
+        <div class="sticky-tbl">
+          <table class="data-tbl">
+            <thead><tr><th>保单年度</th><th>累计已交</th><th>现金价值</th><th>现价/已交</th><th>IRR</th></tr></thead>
+            <tbody>
+              ${rows.filter(r => r.year <= 5 || r.year % 5 === 0).map(r => `
+                <tr>
+                  <td>第 ${r.year} 年</td>
+                  <td>${fmtMoney(r.paid)}</td>
+                  <td style="color:${r.cv >= r.paid ? 'var(--gold)' : 'var(--txt)'}">${fmtMoney(r.cv)}</td>
+                  <td>${(r.cv / r.paid * 100).toFixed(1)}%</td>
+                  <td>${r.cv < r.paid ? '<span style="color:var(--red)">亏损</span>' : fmtIrr(r.irr) + '%'}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>`;
+  setTimeout(() => drawQuickChart(rows), 30);
+  scrollToQuickResult();
+}
+
+/* 快速测算图表：现金价值面积 + 已交保费虚线 */
+function drawQuickChart(rows){
+  const box = document.getElementById('quickChartBox');
+  if (!box) return;
+  const pts = rows.slice(0, 30);
+  const W = box.clientWidth || 520, H = 184, padL = 50, padB = 24, padT = 18, padR = 10;
+  const maxV = Math.max(...pts.map(p => Math.max(p.cv, p.paid))) * 1.08;
+
+  const x = i => padL + (pts.length > 1 ? i / (pts.length - 1) : 0.5) * (W - padL - padR);
+  const y = v => padT + (1 - v / maxV) * (H - padT - padB);
+
+  const rawStep = maxV / 4 / 10000;
+  const stepWan = rawStep <= 10 ? 10 : rawStep <= 20 ? 20 : rawStep <= 30 ? 25 : rawStep <= 50 ? 50 : Math.ceil(rawStep / 100) * 100;
+  const topWan = Math.ceil(maxV / 10000 / stepWan) * stepWan;
+  let grid = '';
+  for (let v = 0; v <= topWan; v += stepWan){
+    grid += `<line x1="${padL}" y1="${y(v*10000)}" x2="${W-padR}" y2="${y(v*10000)}" stroke="#232e39"/>
+      <text x="${padL-7}" y="${y(v*10000)+3.5}" fill="#6b7d8f" font-size="9.5" text-anchor="end" font-family="monospace">${v}</text>`;
+  }
+  grid += `<text x="${padL-7}" y="${padT-6}" fill="#6b7d8f" font-size="9" text-anchor="end">万元</text>`;
+
+  const cvPath = pts.map((p,i) => `${i===0?'M':'L'}${x(i).toFixed(1)},${y(p.cv).toFixed(1)}`).join(' ');
+  const pdPath = pts.map((p,i) => `${i===0?'M':'L'}${x(i).toFixed(1)},${y(p.paid).toFixed(1)}`).join(' ');
+  const area = cvPath + ` L${x(pts.length-1).toFixed(1)},${y(0)} L${x(0).toFixed(1)},${y(0)} Z`;
+
+  const beIdx = pts.findIndex(p => p.cv >= p.paid);
+  const beDot = beIdx >= 0 ? `<circle cx="${x(beIdx)}" cy="${y(pts[beIdx].cv)}" r="3.5" fill="#d4a24c" stroke="#0f1419" stroke-width="1.5"/>
+    <text x="${x(beIdx)}" y="${y(pts[beIdx].cv)-9}" fill="#d4a24c" font-size="9.5" text-anchor="middle">回本</text>` : '';
+
+  const xLabels = [0, Math.floor(pts.length/3), Math.floor(pts.length*2/3), pts.length-1]
+    .filter((v,i,a) => a.indexOf(v)===i)
+    .map(i => `<text x="${x(i)}" y="${H-6}" fill="#6b7d8f" font-size="9.5" text-anchor="middle" font-family="monospace">${pts[i].year}年</text>`).join('');
+
+  box.innerHTML = `<svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="display:block">
+    <defs><linearGradient id="qCvGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#d4a24c" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#d4a24c" stop-opacity="0"/>
+    </linearGradient></defs>
+    ${grid}
+    <path d="${area}" fill="url(#qCvGrad)"/>
+    <path d="${pdPath}" fill="none" stroke="#5a7d99" stroke-width="1.4" stroke-dasharray="4 3"/>
+    <path d="${cvPath}" fill="none" stroke="#d4a24c" stroke-width="2"/>
+    ${beDot}${xLabels}
+  </svg>
+  <div class="legend" style="margin-top:2px">
+    <span class="legend-i"><span style="width:14px;height:2px;background:#d4a24c;display:inline-block"></span>现金价值（估）</span>
+    <span class="legend-i"><span style="width:14px;height:2px;background:#5a7d99;display:inline-block"></span>累计已交保费</span>
+  </div>`;
+}
+
+/* 生成结果后滚动到结果区，避免用户以为没反应 */
+function scrollToQuickResult(){
+  const el = document.getElementById('quickResult');
+  if (!el) return;
+  setTimeout(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+}
+</script>

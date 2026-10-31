@@ -1,0 +1,353 @@
+<script>
+/* ==================== 工具函数 ==================== */
+const $ = s => document.querySelector(s);
+const el = (tag, cls, html) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html !== undefined) e.innerHTML = html;
+  return e;
+};
+const money = v => {
+  if (Math.abs(v) >= 10000) return (v / 10000).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' 万';
+  return Math.round(v).toLocaleString('zh-CN');
+};
+const wan = v => (v / 10000).toFixed(1) + ' 万';
+const pct = v => v.toFixed(1) + '%';
+
+function toast(msg){
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._tm);
+  t._tm = setTimeout(() => t.classList.remove('show'), 2000);
+}
+
+function copyText(text, label){
+  navigator.clipboard.writeText(text).then(
+    () => toast((label || '内容') + '已复制到剪贴板'),
+    () => toast('复制失败，请手动选择文字')
+  );
+}
+
+/* ==================== 视图路由 ==================== */
+const VIEW_META = {
+  workbench:{t:'首页概览', d:'早上好，王敏。今天有 6 项需要跟进'},
+  clients:{t:'客户档案', d:'5 位重点客户 · 点击查看画像与持仓'},
+  qa:{t:'客户问答', d:'输入客户问题，生成带溯源、过合规的回复'},
+  allocate:{t:'配置方案', d:'基于客户画像生成四账户配置与产品池'},
+  insurance:{t:'保险测算', d:'导入条款 PDF 与现金价值表，测算 IRR、回本与身故赔付'},
+  compliance:{t:'合规闸门', d:'L1 硬规则 + L2 语义检测 + L3 人工确认'}
+};
+
+let currentClient = CLIENTS[1];
+
+function switchView(name){
+  document.querySelectorAll('.nav-item').forEach(n =>
+    n.classList.toggle('active', n.dataset.view === name));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  const target = document.getElementById('view-' + name);
+  if (target) target.classList.add('active');
+  const meta = VIEW_META[name] || {t:'', d:''};
+  $('#pageTitle').textContent = meta.t;
+  $('#pageDesc').textContent = meta.d;
+  $('#content').scrollTop = 0;
+  if (name === 'qa') setTimeout(() => { const i = $('#chatInput'); if (i) i.focus(); }, 50);
+  if (name === 'insurance') setTimeout(() => {
+    if (typeof bindInsuranceIO === 'function') bindInsuranceIO();
+    if (typeof refreshCalcArea === 'function') refreshCalcArea();
+  }, 30);
+}
+
+/* ==================== 视图一：首页概览 ==================== */
+function renderWorkbench(){
+  const totalAum = CLIENTS.reduce((s, c) => s + c.aum, 0);
+  return `
+  <div class="view active" id="view-workbench">
+    <div class="hero-stats">
+      <div class="stat">
+        <div class="k">管理资产规模</div>
+        <div class="v">${(totalAum/100000000).toFixed(2)}<span class="unit">亿</span></div>
+        <div class="d">5 位重点客户 · 较上月 +2.1%</div>
+      </div>
+      <div class="stat">
+        <div class="k">今日待跟进</div>
+        <div class="v">6<span class="unit">项</span></div>
+        <div class="d">其中 2 项为到期续接</div>
+      </div>
+      <div class="stat">
+        <div class="k">本周客户咨询</div>
+        <div class="v">23<span class="unit">次</span></div>
+        <div class="d">AI 辅助回复 18 次 · 平均 47 秒</div>
+      </div>
+      <div class="stat">
+        <div class="k">本周节省时间</div>
+        <div class="v">9.5<span class="unit">小时</span></div>
+        <div class="d">按问答 12min→4min、方案 180min→40min 估算</div>
+      </div>
+    </div>
+
+    <div class="grid g2" style="grid-template-columns:1.35fr 1fr">
+      <div class="card">
+        <div class="card-h"><h3>今日待办</h3><span class="sub">按客户价值与时效排序</span>
+          <span class="right">6 项未完成</span>
+        </div>
+        <ul class="todo-list">
+          <li class="todo-item">
+            <span class="dot" style="background:#f85149"></span>
+            <div class="body">
+              <div class="t">周慧敏 · 200 万理财今日到期，需给续接方案</div>
+              <div class="m">稳健型 C2 · 明确不接受本金波动 · 到期日 10-31</div>
+            </div>
+            <span class="go" data-act="go-alloc" data-cid="C003">去做方案 →</span>
+          </li>
+          <li class="todo-item">
+            <span class="dot" style="background:#d29922"></span>
+            <div class="body">
+              <div class="t">林晓芸 · 咨询"基金跌了要不要赎回"，已回复待确认</div>
+              <div class="m">昨天 21:40 微信 · AI 已生成话术，等待您确认发送</div>
+            </div>
+            <span class="go" data-act="go-qa" data-cid="C002">查看话术 →</span>
+          </li>
+          <li class="todo-item">
+            <span class="dot" style="background:#d29922"></span>
+            <div class="body">
+              <div class="t">赵明轩 · 长子 12 岁，教育金 + 保险金信托窗口</div>
+              <div class="m">高净值 2150 万 · 自身金融背景强，需数据支撑</div>
+            </div>
+            <span class="go" data-act="go-alloc" data-cid="C004">做方案 →</span>
+          </li>
+          <li class="todo-item">
+            <span class="dot" style="background:#4ea8de"></span>
+            <div class="body">
+              <div class="t">孙雅婷 · 无任何商业保险，重疾缺口约 120 万</div>
+              <div class="m">31 岁 · 收入稳定 · 偏好线上沟通</div>
+            </div>
+            <span class="go" data-act="go-ins" data-cid="C005">测算保障 →</span>
+          </li>
+          <li class="todo-item">
+            <span class="dot" style="background:#4ea8de"></span>
+            <div class="body">
+              <div class="t">陈建国 · 组合回撤提醒：本月 -0.4%，未触发阈值</div>
+              <div class="m">去年曾因 -6% 临时赎回，建议主动做预期管理</div>
+            </div>
+            <span class="go" data-act="go-qa" data-cid="C001">生成沟通稿 →</span>
+          </li>
+          <li class="todo-item">
+            <span class="dot" style="background:#3fb950"></span>
+            <div class="body">
+              <div class="t">本周复盘：AI 辅助输出 18 条，合规拦截 3 条</div>
+              <div class="m">拦截原因：2 条收益承诺、1 条具体标的推荐</div>
+            </div>
+            <span class="go" data-act="go-comp">查看明细 →</span>
+          </li>
+        </ul>
+      </div>
+
+      <div>
+        <div class="card">
+          <div class="card-h"><h3>市场速览</h3><span class="right">15:00 收盘</span></div>
+          <table class="data-tbl">
+            <thead><tr><th>指数</th><th>点位</th><th>涨跌</th><th>近一月</th></tr></thead>
+            <tbody>
+              <tr><td style="font-family:var(--font)">上证指数</td><td>3,486.12</td><td class="up">+0.62%</td><td class="down">-3.1%</td></tr>
+              <tr><td style="font-family:var(--font)">沪深300</td><td>4,021.55</td><td class="down">-0.38%</td><td class="down">-4.2%</td></tr>
+              <tr><td style="font-family:var(--font)">创业板指</td><td>2,187.44</td><td class="up">+1.15%</td><td class="down">-5.9%</td></tr>
+              <tr><td style="font-family:var(--font)">中债总财富</td><td>238.66</td><td class="up">+0.04%</td><td class="up">+0.8%</td></tr>
+              <tr><td style="font-family:var(--font)">沪金主力</td><td>612.40</td><td class="down">-0.71%</td><td class="down">-2.1%</td></tr>
+            </tbody>
+          </table>
+          <div style="margin-top:12px;display:flex;gap:8px">
+            <button class="btn sm primary" data-act="go-qa">问 AI 解读 →</button>
+            <button class="btn sm ghost" data-act="copy-market">复制晨会简报</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h3>合规提示</h3></div>
+          <div class="diag" style="border-left-color:var(--red)">
+            <div class="h" style="color:var(--red)">本周拦截 3 条高风险表述</div>
+            2 条涉及收益承诺（"这个产品年化能到 4.5%"）、1 条涉及具体标的推荐。已自动替换为投教式话术。
+          </div>
+          <div class="diag ok">
+            <div class="h">全部输出已留痕</div>
+            每条 AI 生成内容均记录 prompt、数据快照、模型版本与审核人，可满足监管检查。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ==================== 视图二：客户档案 ==================== */
+function renderClients(){
+  const list = CLIENTS.map(c => `
+    <div class="client-item ${c.id === currentClient.id ? 'active' : ''}" data-cid="${c.id}">
+      <div class="n">${c.name}<span class="risk-badge r${c.risk}">C${c.risk}</span></div>
+      <div class="s">${wan(c.aum)} · ${c.riskTxt}</div>
+    </div>`).join('');
+
+  return `
+  <div class="view" id="view-clients">
+    <div class="client-layout">
+      <div class="client-list">
+        <div class="client-search"><input type="text" placeholder="搜索客户姓名…" id="clientSearch"></div>
+        <div id="clientItems">${list}</div>
+      </div>
+      <div id="clientDetail">${renderClientDetail(currentClient)}</div>
+    </div>
+  </div>`;
+}
+
+function renderClientDetail(c){
+  const bars = c.holdings.map(h => {
+    const colors = ['#d4a24c','#4ea8de','#5a7d99','#3fb950','#a08cd4','#8b6f4e'];
+    const i = c.holdings.indexOf(h);
+    return `<div class="bar-seg" style="width:${h.pct}%;background:${colors[i % 6]}" title="${h.n} ${h.pct}%"></div>`;
+  }).join('');
+  const legend = c.holdings.map((h, i) => {
+    const colors = ['#d4a24c','#4ea8de','#5a7d99','#3fb950','#a08cd4','#8b6f4e'];
+    return `<div class="legend-i"><span class="sq" style="background:${colors[i % 6]}"></span>${h.n} ${h.pct}%</div>`;
+  }).join('');
+
+  return `
+  <div class="card">
+    <div class="card-h" style="margin-bottom:16px">
+      <h3 style="font-size:17px">${c.name}</h3>
+      <span class="tag-pill">${c.age} 岁 · ${c.gender}</span>
+      <span class="tag-pill ${c.risk >= 4 ? 'red' : c.risk <= 2 ? 'green' : 'amber'}">C${c.risk} ${c.riskTxt}</span>
+      <span class="right">最近沟通 ${c.lastContact}</span>
+    </div>
+    <div class="kv-grid">
+      <div class="kv"><div class="k">管理资产</div><div class="v">${wan(c.aum)}</div></div>
+      <div class="kv"><div class="k">可投资产</div><div class="v">${wan(c.investable)}</div></div>
+      <div class="kv"><div class="k">职业</div><div class="v small">${c.job}</div></div>
+      <div class="kv"><div class="k">投资期限</div><div class="v small">${c.horizon}</div></div>
+    </div>
+    <div style="margin-top:13px;display:flex;gap:7px;flex-wrap:wrap">
+      ${c.tags.map(t => `<span class="tag-pill gray">${t}</span>`).join('')}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><h3>当前持仓结构</h3><span class="right">共 ${c.holdings.length} 类资产</span></div>
+    <div class="bar-wrap">${bars}</div>
+    <div class="legend">${legend}</div>
+    <table class="data-tbl" style="margin-top:14px">
+      <thead><tr><th>资产类别</th><th>市值</th><th>占比</th></tr></thead>
+      <tbody>
+        ${c.holdings.map(h => `<tr>
+          <td style="font-family:var(--font)">${h.n}</td>
+          <td>${wan(h.v)}</td>
+          <td>${h.pct.toFixed(1)}%</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="grid g2">
+    <div class="card">
+      <div class="card-h"><h3>AI 诊断</h3><span class="sub">基于持仓 + 画像的自动识别</span></div>
+      ${clientDiagnosis(c).map(d => `
+        <div class="diag ${d.ok ? 'ok' : ''}">
+          <div class="h">${d.title}</div>${d.text}
+        </div>`).join('')}
+    </div>
+    <div class="card">
+      <div class="card-h"><h3>下一步动作</h3></div>
+      <div class="diag" style="border-left-color:var(--acc)">
+        <div class="h" style="color:var(--acc)">建议洽谈主题</div>
+        ${c.nextAction}
+      </div>
+      <div style="font-size:12px;color:var(--txt3);margin:12px 0 6px">沟通备注</div>
+      <div style="font-size:12.8px;color:var(--txt2);line-height:1.75">${c.notes}</div>
+      <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn sm primary" data-act="go-alloc" data-cid="${c.id}">生成配置方案</button>
+        <button class="btn sm" data-act="go-qa" data-cid="${c.id}">AI 回复客户</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* 客户诊断规则 */
+function clientDiagnosis(c){
+  const out = [];
+  const eq = c.holdings.filter(h => /权益|QDII|私募证券/.test(h.n)).reduce((s,h) => s + h.pct, 0);
+  const cash = c.holdings.filter(h => /现金|存款/.test(h.n)).reduce((s,h) => s + h.pct, 0);
+  const ins = c.holdings.filter(h => /增额|年金|保险/.test(h.n)).reduce((s,h) => s + h.pct, 0);
+  const base = ALLOC_MODEL[c.risk];
+
+  if (Math.abs(eq - base.equity) > 8){
+    out.push({title:'权益仓位偏离基准', text:`当前权益类 ${eq.toFixed(1)}%，C${c.risk} 基准为 ${base.equity}%，偏离 ${(eq-base.equity).toFixed(1)}pct。${eq > base.equity ? '建议在反弹中逐步降低至基准附近。' : '在风险承受范围内可适度补足。'}`});
+  }
+  if (cash > base.cash + 5){
+    out.push({title:'闲置现金偏高', text:`现金及存款占比 ${cash.toFixed(1)}%，高于基准 ${base.cash}%。约 ${wan((cash-base.cash)/100*c.aum)} 资金处于低效状态，可考虑转入现金管理类或短债。`});
+  }
+  if (ins < base.ins - 5){
+    out.push({title:'保障配置缺口', text:`保障类资产仅 ${ins.toFixed(1)}%，低于 C${c.risk} 基准 ${base.ins}%。长期确定性现金流不足，建议补充增额终身寿或年金。`});
+  }
+  if (c.risk <= 2 && eq > 15){
+    out.push({title:'适当性风险提示', text:`稳健型客户权益占比 ${eq.toFixed(1)}%，存在适当性错配风险，需在下一次方案中明确说明波动区间。`});
+  }
+  if (!out.length){
+    out.push({title:'配置结构健康', text:'当前配置与风险等级基本匹配，建议保持并关注再平衡窗口。', ok:true});
+  }
+  return out;
+}
+
+/* ==================== 视图三：问答 ==================== */
+function renderQA(){
+  const c = currentClient;
+  return `
+  <div class="view" id="view-qa">
+    <div class="qa-layout">
+      <div class="chat-box">
+        <div class="chat-scroll" id="chatScroll">
+          <div class="msg ai">
+            <div class="av">AI</div>
+            <div class="bubble">
+              已载入客户 <em style="color:#fff;font-weight:600">${c.name}</em>（C${c.risk} ${c.riskTxt}，${wan(c.aum)}）的持仓与沟通偏好。<br>
+              把客户的问题发给我，我会按「结论 → 依据 → 对这位客户意味着什么 → 建议动作」四段生成，并自动过一遍合规闸门。
+            </div>
+          </div>
+        </div>
+        <div class="chat-input-area">
+          <div class="quick-chips">
+            <span class="chip" data-q="最近大盘怎么样？我这基金一直不动">最近大盘怎么样？</span>
+            <span class="chip" data-q="我买的那只基金跌了 8% 了，要不要赎回？">基金跌了要不要赎回</span>
+            <span class="chip" data-q="现在能买黄金吗？听说涨了很多">现在能买黄金吗</span>
+            <span class="chip" data-q="你直接告诉我买哪只能赚钱吧">你告诉我买哪只</span>
+          </div>
+          <div class="chat-input-row">
+            <textarea id="chatInput" placeholder="输入客户的问题，例如：我的基金跌了怎么办？"></textarea>
+            <button class="btn primary" id="sendBtn">生成回复</button>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="side-card">
+          <h4>当前客户</h4>
+          <select id="qaClientSel" style="margin-bottom:10px">
+            ${CLIENTS.map(x => `<option value="${x.id}" ${x.id===c.id?'selected':''}>${x.name} · C${x.risk}</option>`).join('')}
+          </select>
+          <div class="info-row"><span>风险等级</span><span class="v">C${c.risk} ${c.riskTxt}</span></div>
+          <div class="info-row"><span>权益仓位</span><span class="v">${c.holdings.filter(h=>/权益|QDII/.test(h.n)).reduce((s,h)=>s+h.pct,0).toFixed(1)}%</span></div>
+          <div class="info-row"><span>总资产</span><span class="v">${wan(c.aum)}</span></div>
+          <div class="info-row"><span>最近沟通</span><span class="v">${c.lastContact}</span></div>
+        </div>
+        <div class="side-card">
+          <h4>生成链路</h4>
+          <div style="font-size:11.8px;color:var(--txt2);line-height:2.1">
+            <div>① 意图分类</div>
+            <div>② 数据检索（行情 / 持仓 / 研报）</div>
+            <div>③ 合规预检</div>
+            <div>④ 四段式生成</div>
+            <div>⑤ 人工确认后发送</div>
+          </div>
+          <div style="margin-top:10px;font-size:11px;color:var(--txt3);line-height:1.7">
+            每个数字可点开溯源，模型不生成任何未经检索的数值。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+</script>

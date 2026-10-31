@@ -1,0 +1,389 @@
+<script>
+/* ============================================================
+   保险测算引擎 v2
+   1. PDF 条款解析 → 结构化产品要素
+   2. 现金价值表导入（xlsx / csv / pdf 表格）→ 统一数据模型
+   3. IRR / 回本 / 身故赔付 / 减保 / 保单贷款 等真实测算
+   ============================================================ */
+
+/* ---------- 通用：XLSX 解包（纯前端，无需外部库） ---------- */
+async function unzipXlsx(buf){
+  const u8 = new Uint8Array(buf), dv = new DataView(buf);
+  let eocd = -1;
+  for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--){
+    if (dv.getUint32(i, true) === 0x06054b50){ eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('不是有效的 xlsx 文件（未找到 ZIP 目录）');
+  const count = dv.getUint16(eocd + 10, true);
+  let off = dv.getUint32(eocd + 16, true);
+  const files = {};
+  for (let i = 0; i < count; i++){
+    if (dv.getUint32(off, true) !== 0x02014b50) break;
+    const method    = dv.getUint16(off + 10, true);
+    const compSize  = dv.getUint32(off + 20, true);
+    const nameLen   = dv.getUint16(off + 28, true);
+    const extraLen  = dv.getUint16(off + 30, true);
+    const cmtLen    = dv.getUint16(off + 32, true);
+    const localOff  = dv.getUint32(off + 42, true);
+    const name = new TextDecoder('utf-8').decode(u8.subarray(off + 46, off + 46 + nameLen));
+    const lNameLen  = dv.getUint16(localOff + 26, true);
+    const lExtraLen = dv.getUint16(localOff + 28, true);
+    const start = localOff + 30 + lNameLen + lExtraLen;
+    files[name] = { method, raw: u8.subarray(start, start + compSize) };
+    off += 46 + nameLen + extraLen + cmtLen;
+  }
+  if (!files['xl/workbook.xml']) throw new Error('不是有效的 xlsx 文件（缺少 workbook.xml）');
+  return files;
+}
+
+async function readZipEntry(f){
+  if (!f) return '';
+  if (f.method === 0) return new TextDecoder('utf-8').decode(f.raw);
+  if (typeof DecompressionStream === 'undefined') throw new Error('当前浏览器不支持解压，请用 Chrome / Edge 打开');
+  const ds = new DecompressionStream('deflate-raw');
+  const stream = new Blob([f.raw]).stream().pipeThrough(ds);
+  return await new Response(stream).text();
+}
+
+function cellRefToIdx(ref){
+  const m = /^([A-Z]+)(\d+)$/.exec(ref || '');
+  if (!m) return null;
+  let c = 0;
+  for (const ch of m[1]) c = c * 26 + (ch.charCodeAt(0) - 64);
+  return { c: c - 1, r: parseInt(m[2], 10) - 1 };
+}
+
+/* 解析 xlsx → 二维数组（每个 sheet 一份） */
+async function parseXlsx(buf){
+  const files = await unzipXlsx(buf);
+  const sharedXml = await readZipEntry(files['xl/sharedStrings.xml']);
+  let shared = [];
+  if (sharedXml){
+    const sd = new DOMParser().parseFromString(sharedXml, 'application/xml');
+    shared = Array.from(sd.querySelectorAll('si')).map(si =>
+      Array.from(si.querySelectorAll('t')).map(t => t.textContent).join(''));
+  }
+  const wbXml = await readZipEntry(files['xl/workbook.xml']);
+  const wbDoc = new DOMParser().parseFromString(wbXml, 'application/xml');
+  const relXml = await readZipEntry(files['xl/_rels/workbook.xml.rels']);
+  const relDoc = new DOMParser().parseFromString(relXml, 'application/xml');
+  const relMap = {};
+  relDoc.querySelectorAll('Relationship').forEach(r =>
+    relMap[r.getAttribute('Id')] = r.getAttribute('Target'));
+
+  const sheets = [];
+  const sheetEls = Array.from(wbDoc.querySelectorAll('sheet'));
+  for (let i = 0; i < sheetEls.length; i++){
+    const se = sheetEls[i];
+    const rid = se.getAttribute('r:id') || se.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id');
+    let target = relMap[rid] || `worksheets/sheet${i + 1}.xml`;
+    target = target.replace(/^\/?xl\//, '').replace(/^\//, '');
+    const xml = await readZipEntry(files['xl/' + target]);
+    if (!xml) continue;
+    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    const rows = [];
+    doc.querySelectorAll('row').forEach(rowEl => {
+      const r = parseInt(rowEl.getAttribute('r'), 10) - 1;
+      const cells = [];
+      rowEl.querySelectorAll('c').forEach(c => {
+        const pos = cellRefToIdx(c.getAttribute('r'));
+        if (!pos) return;
+        const t = c.getAttribute('t');
+        let val = '';
+        if (t === 's'){
+          const idx = parseInt(c.querySelector('v')?.textContent || '-1', 10);
+          val = shared[idx] !== undefined ? shared[idx] : '';
+        } else if (t === 'inlineStr'){
+          val = Array.from(c.querySelectorAll('is t')).map(x => x.textContent).join('');
+        } else {
+          val = c.querySelector('v')?.textContent ?? '';
+        }
+        cells[pos.c] = val;
+      });
+      rows[r] = cells;
+    });
+    sheets.push({ name: se.getAttribute('name') || ('Sheet' + (i + 1)), rows });
+  }
+  return sheets;
+}
+
+/* CSV 解析（支持引号、逗号、制表符） */
+function parseCsv(text){
+  text = text.replace(/^\uFEFF/, '');
+  const delim = (text.split('\n')[0].match(/\t/g) || []).length > (text.split('\n')[0].match(/,/g) || []).length ? '\t' : ',';
+  const rows = [];
+  let row = [], cur = '', q = false;
+  for (let i = 0; i < text.length; i++){
+    const ch = text[i];
+    if (q){
+      if (ch === '"' && text[i + 1] === '"'){ cur += '"'; i++; }
+      else if (ch === '"') q = false;
+      else cur += ch;
+    } else {
+      if (ch === '"') q = true;
+      else if (ch === delim){ row.push(cur); cur = ''; }
+      else if (ch === '\n'){ row.push(cur); rows.push(row); row = []; cur = ''; }
+      else if (ch !== '\r') cur += ch;
+    }
+  }
+  if (cur !== '' || row.length){ row.push(cur); rows.push(row); }
+  return rows;
+}
+
+/* ---------- 现金价值表智能识别 ---------- */
+const NUM_RE = /^-?\d{1,3}(,\d{3})*(\.\d+)?$|^-?\d+(\.\d+)?$/;
+function toNum(v){
+  if (v === null || v === undefined) return null;
+  let s = String(v).trim().replace(/[,，\s元￥¥]/g, '').replace(/[（(].*?[）)]/g, '');
+  if (!s) return null;
+  // 中文万/亿
+  let mul = 1;
+  if (/万$/.test(s)){ mul = 10000; s = s.replace(/万$/, ''); }
+  if (!NUM_RE.test(s)) return null;
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n * mul;
+}
+
+function normKey(s){
+  return String(s || '').replace(/\s|　/g, '').replace(/[（）()、：:]/g, '');
+}
+
+/* 从二维数组识别表头与数据 */
+function detectTable(rows){
+  if (!rows || !rows.length) return null;
+  // 找表头行：包含"保单年度"或"年度"，且至少 2 列
+  let headerIdx = -1, header = null;
+  for (let i = 0; i < Math.min(rows.length, 30); i++){
+    const r = rows[i] || [];
+    const cells = r.map(c => normKey(c));
+    const hasYear = cells.some(c => /保单年度|保单年度末|年度|年期/.test(c));
+    const hasCV = cells.some(c => /现金价值/.test(c));
+    if (hasYear && r.filter(Boolean).length >= 2){
+      headerIdx = i; header = r; break;
+    }
+  }
+  if (headerIdx < 0) return null;
+
+  const cols = {};
+  header.forEach((h, i) => {
+    const k = normKey(h);
+    if (!k) return;
+    if (/^(保单年度|保单年度末|年度|年期|保单年)$/.test(k)) cols.year = i;
+    else if (/现金价值/.test(k)){
+      (cols.cvCols = cols.cvCols || []).push({ idx: i, label: String(h).trim() });
+    }
+    else if (/累计已交保费|累计保费|已交保费合计/.test(k)) cols.paid = i;
+    else if (/^(年交保费|年缴保费|保费|年缴)$/.test(k)) cols.annual = i;
+    else if (/^年龄$/.test(k)) cols.age = i;
+  });
+
+  if (cols.year === undefined) return null;
+
+  // 提取数据行
+  const data = [];
+  for (let i = headerIdx + 1; i < rows.length; i++){
+    const r = rows[i] || [];
+    const y = toNum(r[cols.year]);
+    if (y === null || y < 1 || y > 120) continue;
+    const rec = { year: Math.round(y) };
+    if (cols.cvCols) rec.cv = cols.cvCols.map(cc => toNum(r[cc.idx]));
+    else rec.cv = [toNum(r[cols.year + 1])];
+    if (cols.paid !== undefined) rec.paid = toNum(r[cols.paid]);
+    if (cols.annual !== undefined) rec.annual = toNum(r[cols.annual]);
+    if (cols.age !== undefined) rec.age = toNum(r[cols.age]);
+    data.push(rec);
+  }
+  if (!data.length) return null;
+  data.sort((a, b) => a.year - b.year);
+
+  // 去重（同一年度保留最后一条）
+  const dedup = [];
+  const seen = new Set();
+  for (let i = data.length - 1; i >= 0; i--){
+    if (!seen.has(data[i].year)){ seen.add(data[i].year); dedup.unshift(data[i]); }
+  }
+  return {
+    headerIdx,
+    columns: (cols.cvCols || []).map(c => c.label),
+    rows: dedup
+  };
+}
+
+/* 从 PDF 文本中提取表格型数据（按行重组） */
+function rowsFromPdfText(text){
+  // PDF 文本抽出来往往是一长串，按"年度数字 + 数字组"的模式切
+  const rows = [];
+  // 按可能的行切分：以 "1 " / "1\t" 或连续的 年 + 数字 开头
+  const lines = text.split(/\n|(?<=元)\s{2,}/).map(s => s.trim()).filter(Boolean);
+  const flat = [];
+  for (const ln of lines){
+    const nums = ln.match(/-?\d[\d,，]*(?:\.\d+)?/g) || [];
+    const yearM = ln.match(/^(\d{1,3})\s/);
+    if (yearM || nums.length >= 2) flat.push(ln);
+  }
+  // 用正则从全文抓"年度 + 若干金额"
+  const re = /(?:^|\s)(\d{1,3})\s+((?:\d[\d,，]*(?:\.\d+)?\s*){1,6})/g;
+  let m;
+  const collected = [];
+  while ((m = re.exec(text)) !== null){
+    const year = parseInt(m[1], 10);
+    if (year < 1 || year > 120) continue;
+    const nums = (m[2].match(/\d[\d,，]*(?:\.\d+)?/g) || []).map(s => parseFloat(s.replace(/[,，]/g, '')));
+    if (nums.length < 1) continue;
+    collected.push({ year, nums });
+  }
+  return collected;
+}
+
+/* ---------- PDF 解析 ---------- */
+async function extractPdf(file){
+  const lib = globalThis.__PDFJS__;
+  if (!lib) throw new Error('PDF 解析库未加载');
+  const buf = await file.arrayBuffer();
+  const doc = await lib.getDocument({ data: new Uint8Array(buf) }).promise;
+  const pages = [];
+  for (let i = 1; i <= doc.numPages; i++){
+    const page = await doc.getPage(i);
+    const tc = await page.getTextContent();
+    // 按 y 坐标分行，保留表格结构
+    const items = tc.items.map(it => ({
+      s: it.str,
+      x: it.transform[4],
+      y: Math.round(it.transform[5]),
+      w: (it.width != null) ? it.width : 0
+    })).filter(it => it.s.trim());
+    const byLine = {};
+    items.forEach(it => {
+      const key = Math.round(it.y / 3) * 3;
+      (byLine[key] = byLine[key] || []).push(it);
+    });
+    const lineKeys = Object.keys(byLine).sort((a, b) => b - a);
+    const lines = [];
+    const cellRows = [];
+    for (const k of lineKeys){
+      const items = byLine[k].sort((a, b) => a.x - b.x);
+      lines.push(items.map(o => o.s).join(''));
+      // 按 x 间距切分单元格：相邻元素间隙 > 阈值即视为不同列
+      const cells = [];
+      let buf = '', prevEnd = null;
+      items.forEach(o => {
+        const w = (o.w != null && o.w > 0) ? o.w : o.s.length * 5;
+        if (prevEnd !== null && (o.x - prevEnd) > 5){
+          if (buf.trim()) cells.push(buf.trim());
+          buf = o.s;
+        } else {
+          buf += o.s;
+        }
+        prevEnd = o.x + w;
+      });
+      if (buf.trim()) cells.push(buf.trim());
+      cellRows.push(cells);
+    }
+    pages.push({
+      no: i,
+      text: lines.join('\n'),
+      rows: cellRows
+    });
+  }
+  return { numPages: doc.numPages, pages, fullText: pages.map(p => p.text).join('\n') };
+}
+
+/* 条款要素抽取规则 */
+const CLAUSE_RULES = [
+  { key:'productName', label:'产品名称', re:/([\u4e00-\u9fa5]{2,20}(?:终身寿险|年金保险|两全保险|定期寿险|重大疾病保险|医疗保险)(?:（[^）]{1,12}）)?)/, group:1 },
+  { key:'clauseNo', label:'条款编号', re:/(?:产品条款编号|条款编号|产品代码)[：:\s]*([A-Za-z0-9\-－]{4,30})/, group:1 },
+  { key:'recordNo', label:'备案号', re:/(?:备案号|备案编号)[：:\s]*([^\n]{4,45}?)(?=\s{2,}|保险公司|$)/, group:1 },
+  { key:'insurer', label:'保险公司', re:/(?:保险公司|保险人)[：:\s]*([\u4e00-\u9fa5]{4,24}公司)/, group:1 },
+  { key:'ageRange', label:'投保年龄', re:/出生满\s*(\d{1,3})\s*日至\s*(\d{1,3})\s*周岁/, group:0 },
+  { key:'period', label:'保险期间', re:/保险期间[^。]{0,20}?(终身|至被保险人\d{1,3}周岁|至\d{1,3}周岁|(\d{1,2})年)/, group:1 },
+  { key:'payYears', label:'交费期间', re:/(?:交费期间|交费方式)[^。]{0,60}?((?:\d{1,2}年交[、，和]?\s*)+)/, group:1 },
+  { key:'increaseRate', label:'保额递增率', re:/(\d+(?:\.\d+)?)\s*%\s*复利递增/, group:1 },
+  // 犹豫期只允许在同一句内、且不能跨越"第七条/第X条"等条款边界
+  { key:'hesitate', label:'犹豫期', re:/(\d{1,3})\s*日(?:为|系)?犹豫期|犹豫期[为是]\s*(\d{1,3})\s*日/, group:1, group2:2 },
+  { key:'waiting', label:'等待期', re:/等待期[^。]{0,20}?(\d{1,3})\s*日|无等待期/, group:0 },
+  { key:'loanRatio', label:'保单贷款比例', re:/贷款[^。]{0,60}?(\d{1,3})\s*%/, group:1 },
+  { key:'reduceLimit', label:'减保限制', re:/减少的基本保险金额不得超过[^。]{0,30}?(\d{1,3})\s*%/, group:1 },
+  { key:'deathBenefit', label:'身故保险金', re:/身故保险金[^。]{0,160}?给付[^。]{0,120}?。/s, group:0 }
+];
+
+function extractClauses(text){
+  const out = {};
+  const found = [];
+  CLAUSE_RULES.forEach(rule => {
+    const m = rule.re.exec(text);
+    if (m){
+      let val = m[rule.group] || m[0];
+      if (rule.group === 1 && !val && rule.group2 && m[rule.group2]) val = m[rule.group2];
+      val = String(val).replace(/\s+/g, ' ').trim();
+      if (rule.key === 'ageRange' && m[1] && m[2]) val = `${m[1]} 至 ${m[2]} 周岁`;
+      out[rule.key] = val;
+      found.push({ key: rule.key, label: rule.label, value: val, long: val.length > 60 });
+    }
+  });
+  return { data: out, found };
+}
+
+/* ---------- 财务计算 ---------- */
+/* IRR：不规则现金流，二分法 + 符号变化检测 */
+function calcIRR(cashflows){
+  const npv = r => cashflows.reduce((s, cf, i) => s + cf / Math.pow(1 + r, i), 0);
+  let pos = false, neg = false;
+  cashflows.forEach(cf => { if (cf > 0) pos = true; if (cf < 0) neg = true; });
+  if (!pos || !neg) return null;
+
+  let lo = -0.9999, hi = 10;
+  let flo = npv(lo), fhi = npv(hi);
+  // 放宽搜索：找符号变化区间
+  if (flo * fhi > 0){
+    let found = false;
+    for (let r = -0.99; r < 5; r += 0.01){
+      const a = npv(r), b = npv(r + 0.01);
+      if (a * b <= 0){ lo = r; hi = r + 0.01; found = true; break; }
+    }
+    if (!found) return null;
+  }
+  for (let i = 0; i < 300; i++){
+    const mid = (lo + hi) / 2;
+    if (npv(mid) > 0) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/* 现金流构造：保费期初缴，退保时取回现金价值 */
+function buildCashflows(annual, payYears, cvAt, years, extra){
+  const cf = [];
+  for (let t = 0; t <= years; t++){
+    let v = 0;
+    if (t < payYears) v -= annual;
+    if (t === years) v += cvAt;
+    if (extra && extra[t]) v += extra[t];
+    cf.push(v);
+  }
+  return cf;
+}
+
+/* 回本年限：现金价值首次 ≥ 累计已交保费 */
+function findBreakEven(rows, payYears, annual){
+  for (const r of rows){
+    const paid = r.paid != null ? r.paid : Math.min(r.year, payYears) * annual;
+    const cv = Array.isArray(r.cv) ? r.cv[0] : r.cv;
+    if (cv != null && cv >= paid) return { year: r.year, paid, cv };
+  }
+  return null;
+}
+
+/* 有效保额增长 */
+function effectiveSA(baseSA, rate, year){
+  return baseSA * Math.pow(1 + rate / 100, year - 1);
+}
+
+/* 保单贷款可贷金额 */
+function loanable(cv, ratio){
+  return cv * ratio / 100;
+}
+
+/* 减保后的现金价值（按比例缩减） */
+function afterReduce(cv, reducePct){
+  return cv * (1 - reducePct / 100);
+}
+</script>

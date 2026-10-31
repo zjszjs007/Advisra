@@ -1,0 +1,344 @@
+<script>
+/* ==================== 视图六：合规闸门 ==================== */
+function renderCompliance(){
+  return `
+  <div class="view" id="view-compliance">
+    <div class="card">
+      <div class="card-h"><h3>实时检测</h3><span class="sub">粘贴拟发送给客户的话术，检测是否触碰红线</span></div>
+      <textarea id="compInput" rows="4" placeholder="例如：张先生，这个产品年化能到 4.5%，保本没问题，建议您全仓买入，再不买就晚了。"></textarea>
+      <div style="margin-top:11px;display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+        <button class="btn primary" data-act="comp-check">检测</button>
+        <button class="btn ghost" data-act="comp-demo">填入示例</button>
+        <span style="font-size:11.5px;color:var(--txt3);margin-left:4px">检测覆盖 ${COMPLIANCE_RULES.length} 条规则 · 平均耗时 0.4s</span>
+      </div>
+      <div id="compResult" style="margin-top:14px"></div>
+    </div>
+
+    <div class="grid g2">
+      <div class="card">
+        <div class="card-h"><h3>规则库</h3><span class="right">本周命中 91 次</span></div>
+        <table class="data-tbl">
+          <thead><tr><th>规则</th><th>层级</th><th>命中</th></tr></thead>
+          <tbody>
+            ${COMPLIANCE_RULES.map(r => `<tr>
+              <td style="font-family:var(--font);line-height:1.5">
+                <div style="color:var(--txt)">${r.kw}</div>
+                <div style="color:var(--txt3);font-size:11px">${r.desc}</div>
+              </td>
+              <td><span class="tag-pill ${r.level==='L1'?'red':r.level==='L2'?'amber':''}">${r.level}</span></td>
+              <td>${r.hit}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>三道闸门</h3></div>
+        <div class="diag" style="border-left-color:var(--red)">
+          <div class="h" style="color:var(--red)">L1 · 硬规则拦截</div>
+          关键词与句式黑名单。"保本""稳赚""必涨""年化 X% 以上""推荐买入"直接拦截，不允许生成。
+        </div>
+        <div class="diag">
+          <div class="h">L2 · 语义检测</div>
+          模型判断是否构成变相承诺。例如"这只基金大概率能涨回来"表面没说保本，但语义上等价于承诺。
+        </div>
+        <div class="diag ok">
+          <div class="h">L3 · 人工确认</div>
+          涉及具体产品的操作建议，强制二次确认并留痕。系统记录审核人、时间、发送对象。
+        </div>
+        <div style="margin-top:12px;font-size:11.5px;color:var(--txt3);line-height:1.75">
+          所有对外输出统一加注：本内容由 AI 辅助生成，仅供内部参考，对外发送前请核对。
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function checkCompliance(text){
+  const hits = [];
+  const patterns = [
+    {re:/(保本|保证收益|稳赚|稳赚不赔|保底收益)/g, rule:'R-001', level:'L1', name:'禁用收益承诺类表述'},
+    {re:/(必涨|翻倍|一定能赚|肯定涨|不会亏)/g, rule:'R-002', level:'L1', name:'禁用确定性涨跌预测'},
+    {re:/年化.{0,6}(\d+(\.\d+)?)\s*%/g, rule:'R-003', level:'L1', name:'禁用具体收益率承诺'},
+    {re:/(推荐买|建议全仓|全仓买入|赶紧买|马上买)/g, rule:'R-004', level:'L1', name:'具体标的买卖建议需持牌'},
+    {re:/(再不买就晚了|错过就没了|最后机会|限时)/g, rule:'R-006', level:'L2', name:'制造紧迫感营销'},
+    {re:/(大概率能涨|基本不会亏|几乎是稳的)/g, rule:'R-005', level:'L2', name:'变相收益承诺'}
+  ];
+  patterns.forEach(p => {
+    let m;
+    p.re.lastIndex = 0;
+    while ((m = p.re.exec(text)) !== null){
+      hits.push({ word: m[0], ...p });
+    }
+  });
+  return hits;
+}
+
+/* ==================== 事件绑定 ==================== */
+document.addEventListener('click', e => {
+  const navItem = e.target.closest('.nav-item');
+  if (navItem){ switchView(navItem.dataset.view); return; }
+
+  const clientItem = e.target.closest('.client-item');
+  if (clientItem){
+    const c = CLIENTS.find(x => x.id === clientItem.dataset.cid);
+    if (c){ currentClient = c; renderAll(); switchView('clients'); }
+    return;
+  }
+
+  const chip = e.target.closest('.chip');
+  if (chip){ sendQuestion(chip.dataset.q); return; }
+
+  const objQ = e.target.closest('.obj-q');
+  if (objQ){ objQ.parentElement.classList.toggle('open'); return; }
+
+  const actEl = e.target.closest('[data-act]');
+  if (!actEl) return;
+  const act = actEl.dataset.act;
+
+  if (act === 'go-qa' || act === 'go-alloc' || act === 'go-ins' || act === 'go-comp'){
+    if (actEl.dataset.cid) currentClient = CLIENTS.find(x => x.id === actEl.dataset.cid) || currentClient;
+    if (act === 'go-qa'){ renderAll(); switchView('qa'); }
+    if (act === 'go-alloc'){
+      allocState.clientId = currentClient.id;
+      renderAll(); switchView('allocate');
+      setTimeout(() => document.querySelector('[data-act="alloc-run"]')?.click(), 60);
+    }
+    if (act === 'go-ins'){ renderAll(); switchView('insurance'); }
+    if (act === 'go-comp'){ renderAll(); switchView('compliance'); }
+    return;
+  }
+
+  if (act === 'copy-market'){
+    copyText('【晨会简报 2026-10-31】\n上证 3,486.12 +0.62%；沪深300 4,021.55 -0.38%；创业板 2,187.44 +1.15%\n近一月：沪深300 -4.2%，估值处近5年42%分位，不算贵。\n成交额 8,200 亿，存量博弈特征明显。', '晨会简报');
+    return;
+  }
+  if (act === 'alloc-run'){ runAlloc(); return; }
+  if (act === 'alloc-reset'){ allocState.step = 1; document.getElementById('allocBody').innerHTML = allocForm(); updateWizard(1); return; }
+  if (act === 'copy-proposal'){
+    const txt = document.getElementById('proposalText')?.innerText || '';
+    copyText(txt, '建议书');
+    return;
+  }
+  if (act === 'copy-ins2'){
+    const talks = document.querySelectorAll('#insResult2 .human-talk');
+    copyText(Array.from(talks).map(t => t.innerText).join('\n\n'), '客户话术');
+    return;
+  }
+  if (act === 'ins-run2'){ runInsuranceCalc(); return; }
+  if (act === 'q-run'){ runQuickCalc(); return; }
+  if (act === 'q-scroll-import'){
+    document.getElementById('view-insurance')?.scrollIntoView({ behavior:'smooth', block:'start' });
+    document.getElementById('content').scrollTo({ top: 0, behavior: 'smooth' });
+    toast('请在上方导入条款 PDF 或现金价值表，切换为精算');
+    return;
+  }
+  if (act === 'ins-clear'){
+    insV2 = { clause:null, table:null, payYears:5, selectedCol:0, annual:100000, baseSA:1000000, calc:null, step:1 };
+    renderAll(); switchView('insurance');
+    return;
+  }
+  if (act === 'comp-check'){
+    const t = document.getElementById('compInput').value.trim();
+    if (!t){ toast('请先输入待检测内容'); return; }
+    renderCompResult(t);
+    return;
+  }
+  if (act === 'comp-demo'){
+    document.getElementById('compInput').value = '张先生，这个产品年化能到 4.5%，保本没问题，建议您全仓买入，再不买就晚了。';
+    renderCompResult(document.getElementById('compInput').value);
+    return;
+  }
+});
+
+function updateWizard(step){
+  [1,2,3,4].forEach(i => {
+    const n = document.getElementById('ws' + i);
+    if (!n) return;
+    n.classList.toggle('on', i === step);
+    n.classList.toggle('done', i < step);
+  });
+}
+
+function runAlloc(){
+  const body = document.getElementById('allocBody');
+  body.innerHTML = `<div class="card"><div class="empty-hint">正在计算配置方案…</div></div>`;
+  setTimeout(() => {
+    body.innerHTML = allocResult();
+    updateWizard(2);
+  }, 480);
+}
+
+/* 问答逻辑 */
+function sendQuestion(q){
+  const scroll = document.getElementById('chatScroll');
+  if (!scroll) return;
+  scroll.appendChild(el('div', 'msg me', `<div class="av">王</div><div class="bubble">${q}</div>`));
+  scroll.scrollTop = scroll.scrollHeight;
+
+  const typing = el('div', 'msg ai', `<div class="av">AI</div><div class="bubble"><span class="typing"><i></i><i></i><i></i></span></div>`);
+  scroll.appendChild(typing);
+  scroll.scrollTop = scroll.scrollHeight;
+
+  setTimeout(() => {
+    const hit = QA_LIB.find(x => x.keys.some(k => q.includes(k))) || QA_LIB[0];
+    typing.remove();
+    scroll.appendChild(buildAnswerBubble(hit, currentClient));
+    scroll.scrollTop = scroll.scrollHeight;
+  }, 900);
+}
+
+function buildAnswerBubble(item, c){
+  const a = item.answer;
+  const bubble = el('div', 'bubble');
+  bubble.innerHTML = `
+    <div class="ai-block">
+      <div class="lb"><span class="n">1</span>一句话结论</div>
+      <p>${a.conclusion}</p>
+    </div>
+    <div class="ai-block">
+      <div class="lb"><span class="n">2</span>数据依据</div>
+      <p>${a.evidence.map((e, i) => `· ${e} <a class="src-link" data-src="${i}">溯源</a>`).join('<br>')}</p>
+    </div>
+    <div class="ai-block">
+      <div class="lb"><span class="n">3</span>对 ${c.name} 意味着什么</div>
+      <p>${a.personal}</p>
+    </div>
+    <div class="ai-block">
+      <div class="lb"><span class="n">4</span>建议动作</div>
+      <p>${a.action}</p>
+    </div>
+    <div class="compliance-box ${a.blocked === true ? 'warn' : ''}">
+      ${a.blocked === true ? '⛔ ' : '⚖ '}${a.compliance || '本内容由 AI 辅助生成，仅供内部参考，对外发送前请核对。'}
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn sm primary" data-copy-ans="1">复制这段话</button>
+      <button class="btn sm ghost" data-act="go-alloc">生成配套方案 →</button>
+      <button class="btn sm ghost" data-act="go-comp">送合规复核</button>
+    </div>`;
+  bubble.querySelector('[data-copy-ans]').addEventListener('click', () => {
+    const txt = `【${c.name}】\n${a.conclusion.replace(/<[^>]+>/g,'')}\n\n依据：\n${a.evidence.map(e=>'· '+e).join('\n')}\n\n${a.personal.replace(/<[^>]+>/g,'')}\n\n建议：${a.action.replace(/<[^>]+>/g,'')}\n\n${a.compliance}`;
+    copyText(txt, '回复话术');
+  });
+  bubble.querySelectorAll('.src-link').forEach(link => {
+    link.addEventListener('click', () => {
+      const i = +link.dataset.src;
+      toast('数据来源：' + (a.sources[i] || '原始行情页'));
+    });
+  });
+  const wrap = el('div', 'msg ai');
+  wrap.innerHTML = '<div class="av">AI</div>';
+  wrap.appendChild(bubble);
+  return wrap;
+}
+
+/* 合规检测渲染 */
+function renderCompResult(text){
+  const hits = checkCompliance(text);
+  const box = document.getElementById('compResult');
+  if (!hits.length){
+    box.innerHTML = `<div class="compliance-box" style="background:#17221a;border-color:#24402c;color:#b8d8c1">
+      ✓ 未检测到规则命中。仍建议人工复核：涉及具体产品时需确认适当性匹配。
+    </div>`;
+    return;
+  }
+  const highlighted = text.replace(/(保本|保证收益|稳赚不赔|稳赚|必涨|翻倍|一定能赚|肯定涨|不会亏|推荐买|建议全仓|全仓买入|赶紧买|马上买|再不买就晚了|错过就没了|最后机会|限时|大概率能涨|基本不会亏|几乎是稳的|年化.{0,6}\d+(\.\d+)?\s*%)/g,
+    m => `<span style="background:#4d2c2c;color:#ffb3b3;padding:1px 3px;border-radius:3px">${m}</span>`);
+
+  box.innerHTML = `
+    <div style="background:#241a1a;border:1px solid #4d2c2c;border-radius:8px;padding:12px 14px;margin-bottom:11px">
+      <div style="color:#f85149;font-weight:600;font-size:12.5px;margin-bottom:7px">⛔ 检测到 ${hits.length} 处高风险表述，不可直接发送</div>
+      <div style="font-size:12.8px;line-height:1.9;color:var(--txt2)">${highlighted}</div>
+    </div>
+    <table class="data-tbl">
+      <thead><tr><th>命中表述</th><th>规则</th><th>层级</th><th>问题</th></tr></thead>
+      <tbody>
+        ${hits.map(h => `<tr>
+          <td style="font-family:var(--font);color:#ffb3b3">${h.word}</td>
+          <td>${h.rule}</td>
+          <td><span class="tag-pill ${h.level==='L1'?'red':'amber'}">${h.level}</span></td>
+          <td style="font-family:var(--font);text-align:left;color:var(--txt3);font-size:11.5px">${h.name}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+    <div style="margin-top:12px">
+      <div style="font-size:12px;color:var(--acc);margin-bottom:6px">AI 建议改写：</div>
+      <div style="background:#17221a;border:1px solid #24402c;border-radius:8px;padding:12px 14px;font-size:12.8px;color:#b8d8c1;line-height:1.85">
+        张先生，这款产品是长期储蓄型，合同里写明了每个年度的现金价值，前 5 年退保会有损失，适合 5 年以上不用的资金。它的价值在于锁定长期利率，而不是短期收益。具体是否合适，要看您这笔钱的用途和时间安排，我们可以一起算一下。
+      </div>
+    </div>`;
+}
+
+/* ==================== 初始化 ==================== */
+function renderAll(){
+  const content = document.getElementById('content');
+  const scrollTop = content.scrollTop;
+  content.innerHTML = renderWorkbench() + renderClients() + renderQA() + renderAllocate() + renderInsurance() + renderCompliance();
+  document.getElementById('allocBody').innerHTML = allocForm();
+
+  // 客户搜索
+  const search = document.getElementById('clientSearch');
+  if (search){
+    search.addEventListener('input', ev => {
+      const kw = ev.target.value.trim();
+      document.querySelectorAll('.client-item').forEach(item => {
+        const n = item.querySelector('.n').textContent;
+        item.style.display = !kw || n.includes(kw) ? '' : 'none';
+      });
+    });
+  }
+
+  // 问答客户切换
+  const qsel = document.getElementById('qaClientSel');
+  if (qsel){
+    qsel.addEventListener('change', ev => {
+      currentClient = CLIENTS.find(x => x.id === ev.target.value) || currentClient;
+      renderAll(); switchView('qa');
+    });
+  }
+
+  // 发送
+  const sendBtn = document.getElementById('sendBtn');
+  if (sendBtn){
+    sendBtn.addEventListener('click', () => {
+      const input = document.getElementById('chatInput');
+      const v = input.value.trim();
+      if (!v){ toast('请输入客户的问题'); return; }
+      input.value = '';
+      sendQuestion(v);
+    });
+  }
+  const chatInput = document.getElementById('chatInput');
+  if (chatInput){
+    chatInput.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter' && !ev.shiftKey){ ev.preventDefault(); document.getElementById('sendBtn').click(); }
+    });
+  }
+
+  // 配置表单联动
+  const fClient = document.getElementById('f_client');
+  if (fClient){
+    fClient.addEventListener('change', ev => {
+      allocState.clientId = ev.target.value;
+      const c = CLIENTS.find(x => x.id === ev.target.value);
+      document.getElementById('f_age').value = c.age;
+      document.getElementById('f_risk').value = c.risk;
+      document.getElementById('f_amount').value = Math.round(c.investable / 10000);
+    });
+  }
+
+  content.scrollTop = scrollTop;
+  bindInsuranceIO();
+  const active = document.querySelector('.nav-item.active');
+  if (active) switchView(active.dataset.view);
+}
+
+/* 启动：业务脚本先于保险模块加载，故等 DOM 与全部脚本就绪后再渲染 */
+(function boot(){
+  const start = () => {
+    try { renderAll(); }
+    catch (e) { console.error('初始化失败', e); }
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else setTimeout(start, 0);
+})();
+</script>
