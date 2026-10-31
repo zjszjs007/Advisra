@@ -6,7 +6,7 @@
 中文名**明策**：「明」是把话说清楚、把依据讲明白，「策」是配置与策略。
 
 [![Live Demo](https://img.shields.io/badge/demo-在线访问-2ea44f?style=flat-square)](https://zjszjs007.github.io/Advisra/)
-[![Local](https://img.shields.io/badge/local-双击打开-blue?style=flat-square)](./prototype/index.html)
+[![Local](https://img.shields.io/badge/local-双击打开-blue?style=flat-square)](./docs/index.html)
 [![Size](https://img.shields.io/badge/size-2.9MB-blue?style=flat-square)]()
 [![Deps](https://img.shields.io/badge/dependencies-none-brightgreen?style=flat-square)]()
 
@@ -14,7 +14,7 @@
 
 ## 这是什么
 
-一个**单文件、零依赖、可离线运行**的交互原型。双击 `prototype/index.html` 就能用，不需要安装、不需要启动服务器、不需要联网。
+一个**单文件、零依赖、可离线运行**的交互原型。双击 `docs/index.html` 就能用，不需要安装、不需要启动服务器、不需要联网。
 
 它解决的是财富管理从业者每天被反复打断的三个动作：
 
@@ -36,7 +36,7 @@
 
 ```bash
 git clone https://github.com/zjszjs007/Advisra.git
-cd Advisra/prototype
+cd Advisra/docs
 # 直接双击 index.html，或用浏览器打开
 ```
 
@@ -92,7 +92,7 @@ cd Advisra/prototype
 
 ### 单文件架构
 
-生产文件 `advisra.html` 由 `prototype/parts/` 下的 9 个片段拼接而成：
+生产文件 `index.html` 由 `docs/parts/` 下的 9 个片段拼接而成：
 
 ```
 parts/
@@ -139,7 +139,7 @@ node build.cjs         # 拼接生成 advisra.html
 
 ## 演示数据
 
-`prototype/samples/` 提供 5 个测试文件：
+`docs/samples/` 提供 5 个测试文件：
 
 | 文件 | 用途 |
 |---|---|
